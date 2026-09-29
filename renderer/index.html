@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' https: data:; style-src 'self'; script-src 'self'; connect-src 'none';"
+    />
+    <title>清影下载器</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-frame">
+      <aside class="sidebar">
+        <div class="brand">
+          <img class="brand-icon" src="./assets/app-icon.png" alt="" />
+          <div>
+            <p class="eyebrow">QINGYING</p>
+            <h1>清影下载器</h1>
+          </div>
+        </div>
+
+        <p class="brand-copy">把需要的画面和声音，清楚地保存到本地。</p>
+
+        <ol class="workflow" aria-label="下载步骤">
+          <li id="step-analyze" class="workflow-step active" data-state="current">
+            <span class="step-index">01</span>
+            <span><strong>解析链接</strong><small>读取可用画质与音轨</small></span>
+          </li>
+          <li id="step-format" class="workflow-step" data-state="pending">
+            <span class="step-index">02</span>
+            <span><strong>选择格式</strong><small>确认封装方式和保存位置</small></span>
+          </li>
+          <li id="step-save" class="workflow-step" data-state="pending">
+            <span class="step-index">03</span>
+            <span><strong>保存文件</strong><small>查看速度、进度和结果</small></span>
+          </li>
+        </ol>
+
+        <div class="privacy-note">
+          <svg aria-hidden="true" viewBox="0 0 24 24">
+            <path d="M12 3 5.5 5.8v5.1c0 4.3 2.7 8.2 6.5 9.6 3.8-1.4 6.5-5.3 6.5-9.6V5.8L12 3Z" />
+            <path d="m9.5 12 1.7 1.7 3.6-4" />
+          </svg>
+          <div><strong>本地执行</strong><span>下载流程由本机工具完成</span></div>
+        </div>
+
+        <footer>
+          <span>仅保存你有权下载的内容</span>
+          <span id="app-version">v1.1.0</span>
+        </footer>
+      </aside>
+
+      <main class="workspace">
+        <header class="workspace-header">
+          <div>
+            <p class="eyebrow">CAPTURE DESK</p>
+            <h2>下载清晰版本</h2>
+            <p>粘贴视频网址，清影会先读取格式，不会立即下载。</p>
+          </div>
+          <span class="local-badge"><i></i> 本地处理</span>
+        </header>
+
+        <section class="card input-card" aria-labelledby="link-heading">
+          <div class="section-heading">
+            <span class="section-index">01</span>
+            <div>
+              <h3 id="link-heading">视频网址</h3>
+              <p>支持 YouTube、X、哔哩哔哩、抖音、TikTok、小红书、Instagram 图片等主流网站</p>
+            </div>
+          </div>
+
+          <label class="sr-only" for="url">输入视频网址</label>
+          <div class="url-row">
+            <div class="input-shell">
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M10.6 13.4a4 4 0 0 0 5.7 0l2.1-2.1a4 4 0 0 0-5.7-5.7l-1.2 1.2" />
+                <path d="M13.4 10.6a4 4 0 0 0-5.7 0l-2.1 2.1a4 4 0 0 0 5.7 5.7l1.2-1.2" />
+              </svg>
+              <input
+                id="url"
+                type="url"
+                inputmode="url"
+                placeholder="粘贴 https:// 开头的视频网址"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </div>
+            <button id="paste" class="button secondary" type="button">
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M9 5.5h6M9.5 3h5l1 2.5h-7L9.5 3Z" />
+                <path d="M7 5.5H5.5v15h13v-15H17" />
+              </svg>
+              粘贴
+            </button>
+            <button id="analyze" class="button primary" type="button">
+              <span class="button-spinner" aria-hidden="true"></span>
+              <svg class="button-icon" aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M5 12h13M14 7l5 5-5 5" />
+              </svg>
+              <span id="analyze-text">解析链接</span>
+            </button>
+          </div>
+
+          <div class="input-actions">
+            <div class="login-buttons">
+              <button id="douyin-login" class="text-button" type="button">
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M8 10V8a4 4 0 0 1 8 0v2" />
+                  <path d="M6 10h12v10H6z" />
+                  <path d="M12 14v2" />
+                </svg>
+                抖音需先登录
+              </button>
+              <button id="tiktok-login" class="text-button" type="button">
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M8 10V8a4 4 0 0 1 8 0v2" />
+                  <path d="M6 10h12v10H6z" />
+                  <path d="M12 14v2" />
+                </svg>
+                TikTok 可选登录
+              </button>
+              <button id="bilibili-login" class="text-button" type="button">
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M8 10V8a4 4 0 0 1 8 0v2" />
+                  <path d="M6 10h12v10H6z" />
+                  <path d="M12 14v2" />
+                </svg>
+                哔哩哔哩建议登录
+              </button>
+              <button id="xiaohongshu-login" class="text-button" type="button">
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M8 10V8a4 4 0 0 1 8 0v2" />
+                  <path d="M6 10h12v10H6z" />
+                  <path d="M12 14v2" />
+                </svg>
+                小红书可选登录
+              </button>
+              <button id="instagram-login" class="text-button" type="button">
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M8 10V8a4 4 0 0 1 8 0v2" />
+                  <path d="M6 10h12v10H6z" />
+                  <path d="M12 14v2" />
+                </svg>
+                Instagram 图片需登录
+              </button>
+            </div>
+            <p id="status" class="status" role="status" aria-live="polite">
+              等待粘贴链接
+            </p>
+          </div>
+        </section>
+
+        <section id="empty-state" class="empty-state" aria-label="等待解析">
+          <div class="empty-visual" aria-hidden="true">
+            <span></span>
+            <svg viewBox="0 0 24 24">
+              <path d="M12 4v11M8 11l4 4 4-4" />
+              <path d="M5 19h14" />
+            </svg>
+          </div>
+          <div>
+            <strong id="empty-title">解析结果会显示在这里</strong>
+            <p id="empty-copy">你可以先查看画质、编码和文件大小，再决定下载。</p>
+          </div>
+        </section>
+
+        <section id="media-card" class="card media-card hidden" aria-labelledby="title">
+          <div class="media-summary">
+            <div class="thumbnail-wrap">
+              <img id="thumbnail" alt="" />
+              <span id="source-host" class="source-host"></span>
+            </div>
+            <div class="media-copy">
+              <p id="uploader" class="eyebrow"></p>
+              <h3 id="title"></h3>
+              <p id="meta" class="media-meta"></p>
+            </div>
+          </div>
+
+          <div class="mode-tabs" role="tablist" aria-label="下载模式">
+            <button
+              id="tab-combined"
+              class="mode active"
+              type="button"
+              role="tab"
+              aria-selected="true"
+              aria-controls="format-panel"
+              data-mode="combined"
+            >视频 + 音频</button>
+            <button
+              id="tab-video"
+              class="mode"
+              type="button"
+              role="tab"
+              aria-selected="false"
+              aria-controls="format-panel"
+              data-mode="video"
+            >仅视频</button>
+            <button
+              id="tab-audio"
+              class="mode"
+              type="button"
+              role="tab"
+              aria-selected="false"
+              aria-controls="format-panel"
+              data-mode="audio"
+            >仅音频</button>
+          </div>
+
+          <div id="format-panel" class="format-panel" role="tabpanel">
+            <div id="video-field" class="field">
+              <label for="video-format">视频画质</label>
+              <select id="video-format"></select>
+            </div>
+            <div id="audio-field" class="field">
+              <label for="audio-format">音频轨道</label>
+              <select id="audio-format"></select>
+            </div>
+            <div id="audio-output-field" class="field hidden">
+              <label for="audio-output">输出格式</label>
+              <select id="audio-output">
+                <option value="mp3">MP3 · 通用</option>
+                <option value="m4a">M4A · 原质</option>
+                <option value="opus">OPUS · 高压缩</option>
+                <option value="wav">WAV · 无压缩</option>
+              </select>
+            </div>
+          </div>
+
+          <p id="selection-note" class="selection-note"></p>
+
+          <div class="field folder-field">
+            <label for="folder">保存位置</label>
+            <div class="folder-row">
+              <div class="input-shell">
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M3.5 6.5h6l2 2h9v10h-17z" />
+                </svg>
+                <input id="folder" type="text" placeholder="选择保存文件夹" readonly />
+              </div>
+              <button id="choose-folder" class="button secondary" type="button">
+                选择文件夹
+              </button>
+            </div>
+          </div>
+
+          <div class="download-row">
+            <button id="download" class="button primary wide" type="button">
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="M12 4v11M8 11l4 4 4-4" />
+                <path d="M5 20h14" />
+              </svg>
+              <span id="download-text">开始下载</span>
+            </button>
+            <button id="cancel" class="button danger hidden" type="button">取消下载</button>
+            <button id="open-folder" class="button secondary hidden" type="button">
+              打开文件夹
+            </button>
+          </div>
+
+          <div id="progress-wrap" class="progress-wrap hidden">
+            <div class="progress-head">
+              <span id="progress-label">准备中…</span>
+              <span id="progress-detail"></span>
+            </div>
+            <div
+              id="progress-track"
+              class="progress-track"
+              role="progressbar"
+              aria-label="下载进度"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            >
+              <div id="progress-bar"></div>
+            </div>
+            <p id="log" class="log" aria-live="polite"></p>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="./app.js"></script>
+  </body>
+</html>

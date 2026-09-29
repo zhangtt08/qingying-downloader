@@ -1,0 +1,8 @@
+{
+  "name": "qingying-downloader",
+  "version": "1.4.0",
+  "description": "A secure Electron frontend for yt-dlp with separate video and audio format selection.",
+  "main": "electron/main.cjs",
+  "author": "Codex",
+  "license": "MIT"
+}
