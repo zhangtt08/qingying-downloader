@@ -38,29 +38,40 @@
         <ol class="workflow" aria-label="下载步骤">
           <li id="step-analyze" class="workflow-step active" data-state="current">
             <span class="step-index">01</span>
-            <span><strong>解析链接</strong><small>读取可用画质与音轨</small></span>
+            <span><strong>解析链接</strong><small>自动选引擎并读出格式</small></span>
           </li>
           <li id="step-format" class="workflow-step" data-state="pending">
             <span class="step-index">02</span>
-            <span><strong>选择格式</strong><small>确认封装方式和保存位置</small></span>
+            <span><strong>选择格式</strong><small>确认封装、命名与位置</small></span>
           </li>
           <li id="step-save" class="workflow-step" data-state="pending">
             <span class="step-index">03</span>
-            <span><strong>保存文件</strong><small>查看速度、进度和结果</small></span>
+            <span><strong>队列下载</strong><small>并发、暂停、重试与历史</small></span>
           </li>
         </ol>
+
+        <section class="side-panel" aria-labelledby="engine-title">
+          <div class="side-panel-head">
+            <h2 id="engine-title" class="side-title">本机引擎</h2>
+            <button id="probe-engines" class="mini-button" type="button">重新探测</button>
+          </div>
+          <ul id="engine-list" class="engine-list" aria-live="polite">
+            <li class="engine-row"><span>正在探测…</span></li>
+          </ul>
+          <p id="engine-note" class="side-note"></p>
+        </section>
 
         <div class="privacy-note">
           <svg aria-hidden="true" viewBox="0 0 24 24">
             <path d="M12 3 5.5 5.8v5.1c0 4.3 2.7 8.2 6.5 9.6 3.8-1.4 6.5-5.3 6.5-9.6V5.8L12 3Z" />
             <path d="m9.5 12 1.7 1.7 3.6-4" />
           </svg>
-          <div><strong>本地执行</strong><span>下载流程由本机工具完成</span></div>
+          <div><strong>本地执行</strong><span>下载由本机引擎完成，数据不出这台电脑</span></div>
         </div>
 
         <footer>
           <span>仅保存你有权下载的内容</span>
-          <span id="app-version">v1.1.0</span>
+          <span id="app-version">v1.4.0</span>
         </footer>
       </aside>
 
@@ -69,7 +80,7 @@
           <div>
             <p class="eyebrow">CAPTURE DESK</p>
             <h2>下载清晰版本</h2>
-            <p>粘贴视频网址，清影会先读取格式，不会立即下载。</p>
+            <p>粘贴一条或一批链接，清影自己判断该用哪个引擎，不会立即下载。</p>
           </div>
           <span class="local-badge"><i></i> 本地处理</span>
         </header>
@@ -78,12 +89,12 @@
           <div class="section-heading">
             <span class="section-index">01</span>
             <div>
-              <h3 id="link-heading">视频网址</h3>
-              <p>支持 YouTube、X、哔哩哔哩、抖音、TikTok、小红书、Instagram 图片等主流网站</p>
+              <h3 id="link-heading">链接</h3>
+              <p>支持 YouTube、哔哩哔哩、抖音、TikTok、小红书、Instagram 等；视频与图集由引擎自动分流</p>
             </div>
           </div>
 
-          <label class="sr-only" for="url">输入视频网址</label>
+          <label class="sr-only" for="url">输入视频或图片链接</label>
           <div class="url-row">
             <div class="input-shell">
               <svg aria-hidden="true" viewBox="0 0 24 24">
@@ -94,7 +105,7 @@
                 id="url"
                 type="url"
                 inputmode="url"
-                placeholder="粘贴 https:// 开头的视频网址"
+                placeholder="粘贴一条 https:// 链接"
                 autocomplete="off"
                 spellcheck="false"
               />
@@ -115,53 +126,30 @@
             </button>
           </div>
 
-          <div class="input-actions">
-            <div class="login-buttons">
-              <button id="douyin-login" class="text-button" type="button">
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <path d="M8 10V8a4 4 0 0 1 8 0v2" />
-                  <path d="M6 10h12v10H6z" />
-                  <path d="M12 14v2" />
-                </svg>
-                抖音需先登录
-              </button>
-              <button id="tiktok-login" class="text-button" type="button">
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <path d="M8 10V8a4 4 0 0 1 8 0v2" />
-                  <path d="M6 10h12v10H6z" />
-                  <path d="M12 14v2" />
-                </svg>
-                TikTok 可选登录
-              </button>
-              <button id="bilibili-login" class="text-button" type="button">
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <path d="M8 10V8a4 4 0 0 1 8 0v2" />
-                  <path d="M6 10h12v10H6z" />
-                  <path d="M12 14v2" />
-                </svg>
-                哔哩哔哩建议登录
-              </button>
-              <button id="xiaohongshu-login" class="text-button" type="button">
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <path d="M8 10V8a4 4 0 0 1 8 0v2" />
-                  <path d="M6 10h12v10H6z" />
-                  <path d="M12 14v2" />
-                </svg>
-                小红书可选登录
-              </button>
-              <button id="instagram-login" class="text-button" type="button">
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <path d="M8 10V8a4 4 0 0 1 8 0v2" />
-                  <path d="M6 10h12v10H6z" />
-                  <path d="M12 14v2" />
-                </svg>
-                Instagram 图片需登录
-              </button>
-            </div>
-            <p id="status" class="status" role="status" aria-live="polite">
-              等待粘贴链接
-            </p>
+          <div class="input-context" id="input-context">
+            <span id="site-chip" class="chip hidden"></span>
+            <span id="login-chip" class="chip hidden"></span>
+            <button id="context-login" class="text-button hidden" type="button">登录该站点</button>
+            <button id="batch-toggle" class="text-button" type="button" aria-expanded="false">批量粘贴多条链接</button>
           </div>
+
+          <div id="batch-panel" class="batch-panel hidden">
+            <label class="sr-only" for="batch-urls">每行一条链接</label>
+            <textarea
+              id="batch-urls"
+              rows="5"
+              spellcheck="false"
+              placeholder="每行一条链接，最多 50 条&#10;解析后按当前设置排队下载"
+            ></textarea>
+            <div class="batch-row">
+              <span id="batch-count" class="side-note">0 条有效链接</span>
+              <button id="batch-run" class="button secondary" type="button">逐条解析并排队</button>
+            </div>
+          </div>
+
+          <p id="status" class="status" role="status" aria-live="polite">
+            等待粘贴链接
+          </p>
         </section>
 
         <section id="empty-state" class="empty-state" aria-label="等待解析">
@@ -178,6 +166,21 @@
           </div>
         </section>
 
+        <section id="error-card" class="card error-card hidden" aria-labelledby="error-title">
+          <div class="section-heading">
+            <span class="section-index alert">!</span>
+            <div>
+              <h3 id="error-title">解析失败</h3>
+              <p id="error-summary"></p>
+            </div>
+          </div>
+          <ul id="remedy-list" class="remedy-list"></ul>
+          <details class="details">
+            <summary>查看引擎原始输出</summary>
+            <pre id="error-detail" class="log"></pre>
+          </details>
+        </section>
+
         <section id="media-card" class="card media-card hidden" aria-labelledby="title">
           <div class="media-summary">
             <div class="thumbnail-wrap">
@@ -188,37 +191,14 @@
               <p id="uploader" class="eyebrow"></p>
               <h3 id="title"></h3>
               <p id="meta" class="media-meta"></p>
+              <p id="engine-line" class="engine-line"></p>
             </div>
           </div>
 
           <div class="mode-tabs" role="tablist" aria-label="下载模式">
-            <button
-              id="tab-combined"
-              class="mode active"
-              type="button"
-              role="tab"
-              aria-selected="true"
-              aria-controls="format-panel"
-              data-mode="combined"
-            >视频 + 音频</button>
-            <button
-              id="tab-video"
-              class="mode"
-              type="button"
-              role="tab"
-              aria-selected="false"
-              aria-controls="format-panel"
-              data-mode="video"
-            >仅视频</button>
-            <button
-              id="tab-audio"
-              class="mode"
-              type="button"
-              role="tab"
-              aria-selected="false"
-              aria-controls="format-panel"
-              data-mode="audio"
-            >仅音频</button>
+            <button id="tab-combined" class="mode active" type="button" role="tab" aria-selected="true" aria-controls="format-panel" data-mode="combined">视频 + 音频</button>
+            <button id="tab-video" class="mode" type="button" role="tab" aria-selected="false" aria-controls="format-panel" data-mode="video">仅视频</button>
+            <button id="tab-audio" class="mode" type="button" role="tab" aria-selected="false" aria-controls="format-panel" data-mode="audio">仅音频</button>
           </div>
 
           <div id="format-panel" class="format-panel" role="tabpanel">
@@ -242,21 +222,7 @@
           </div>
 
           <p id="selection-note" class="selection-note"></p>
-
-          <div class="field folder-field">
-            <label for="folder">保存位置</label>
-            <div class="folder-row">
-              <div class="input-shell">
-                <svg aria-hidden="true" viewBox="0 0 24 24">
-                  <path d="M3.5 6.5h6l2 2h9v10h-17z" />
-                </svg>
-                <input id="folder" type="text" placeholder="选择保存文件夹" readonly />
-              </div>
-              <button id="choose-folder" class="button secondary" type="button">
-                选择文件夹
-              </button>
-            </div>
-          </div>
+          <p id="filename-preview" class="selection-note"></p>
 
           <div class="download-row">
             <button id="download" class="button primary wide" type="button">
@@ -264,32 +230,120 @@
                 <path d="M12 4v11M8 11l4 4 4-4" />
                 <path d="M5 20h14" />
               </svg>
-              <span id="download-text">开始下载</span>
+              <span id="download-text">加入下载队列</span>
             </button>
-            <button id="cancel" class="button danger hidden" type="button">取消下载</button>
-            <button id="open-folder" class="button secondary hidden" type="button">
-              打开文件夹
-            </button>
+            <button id="open-folder" class="button secondary" type="button">打开下载目录</button>
+          </div>
+        </section>
+
+        <section class="card" aria-labelledby="queue-title">
+          <div class="section-heading">
+            <span class="section-index">02</span>
+            <div>
+              <h3 id="queue-title">下载队列</h3>
+              <p><span id="queue-summary">没有任务</span></p>
+            </div>
+            <button id="clear-finished" class="mini-button" type="button">清除已完成</button>
           </div>
 
-          <div id="progress-wrap" class="progress-wrap hidden">
-            <div class="progress-head">
-              <span id="progress-label">准备中…</span>
-              <span id="progress-detail"></span>
-            </div>
-            <div
-              id="progress-track"
-              class="progress-track"
-              role="progressbar"
-              aria-label="下载进度"
-              aria-valuemin="0"
-              aria-valuemax="100"
-              aria-valuenow="0"
-            >
-              <div id="progress-bar"></div>
-            </div>
-            <p id="log" class="log" aria-live="polite"></p>
+          <div class="settings-strip">
+            <label class="mini-field">并发
+              <select id="setting-concurrency">
+                <option value="1">1 个</option>
+                <option value="2">2 个</option>
+                <option value="3">3 个</option>
+                <option value="4">4 个</option>
+              </select>
+            </label>
+            <label class="mini-field">失败自动重试
+              <select id="setting-retry">
+                <option value="0">不重试</option>
+                <option value="1">1 次</option>
+                <option value="2">2 次</option>
+                <option value="3">3 次</option>
+              </select>
+            </label>
+            <label class="mini-field">引擎偏好
+              <select id="setting-engine">
+                <option value="auto">自动判定</option>
+                <option value="yt-dlp">强制 yt-dlp</option>
+                <option value="gallery-dl">强制 gallery-dl</option>
+              </select>
+            </label>
           </div>
+
+          <ul id="task-list" class="task-list" aria-live="polite"></ul>
+          <p id="task-empty" class="list-empty">队列是空的。解析一条链接后点"加入下载队列"。</p>
+        </section>
+
+        <section class="card" aria-labelledby="storage-title">
+          <div class="section-heading">
+            <span class="section-index">03</span>
+            <div>
+              <h3 id="storage-title">保存位置与命名</h3>
+              <p>目录、命名模板和登录态都只在这台电脑上。</p>
+            </div>
+          </div>
+
+          <div class="field folder-field">
+            <label for="folder">下载目录</label>
+            <div class="folder-row">
+              <div class="input-shell">
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M3.5 6.5h6l2 2h9v10h-17z" />
+                </svg>
+                <input id="folder" type="text" placeholder="选择保存文件夹" />
+              </div>
+              <button id="choose-folder" class="button secondary" type="button">选择文件夹</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="template">命名模板（yt-dlp 字段，只允许白名单）</label>
+            <div class="folder-row">
+              <input id="template" type="text" spellcheck="false" />
+              <button id="template-reset" class="button secondary" type="button">恢复默认</button>
+            </div>
+            <p id="template-error" class="field-error hidden"></p>
+          </div>
+
+          <label class="check-row">
+            <input id="setting-subfolder" type="checkbox" />
+            <span>每条链接单独一个子目录（图集更好翻）</span>
+          </label>
+          <label class="check-row">
+            <input id="setting-export-cookies" type="checkbox" />
+            <span>把登录态导出给命令行接口（会在本机写入含 Cookie 的文件，默认关闭）</span>
+          </label>
+          <p class="side-note" id="data-dir-note"></p>
+        </section>
+
+        <section class="card" aria-labelledby="auth-title">
+          <div class="section-heading">
+            <span class="section-index">04</span>
+            <div>
+              <h3 id="auth-title">登录态</h3>
+              <p>哪个站点已登录、什么时候过期、怎么重新登录，都在这里。</p>
+            </div>
+            <button id="refresh-auth" class="mini-button" type="button">检测登录态</button>
+          </div>
+          <ul id="auth-list" class="auth-list" aria-live="polite">
+            <li class="auth-row"><span>正在检测…</span></li>
+          </ul>
+          <p class="side-note">登录窗口里的账号信息不回传到任何服务端；这里只显示状态与过期时间，不显示 Cookie 内容。</p>
+        </section>
+
+        <section class="card" aria-labelledby="history-title">
+          <div class="section-heading">
+            <span class="section-index">05</span>
+            <div>
+              <h3 id="history-title">下载记录</h3>
+              <p><span id="history-summary">还没有记录</span></p>
+            </div>
+            <button id="clear-history" class="mini-button" type="button">清空记录</button>
+          </div>
+          <ul id="history-list" class="history-list"></ul>
+          <p id="history-empty" class="list-empty">下载完成后，这里会列出文件、大小和所在目录。</p>
         </section>
       </main>
     </div>

@@ -1,86 +1,19 @@
 const { app, BrowserWindow, clipboard, dialog, ipcMain, net, session, shell } = require('electron');
-const https = require('node:https');
-const http = require('node:http');
-const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const core = require('./engine-core.cjs');
 const { createAgentApiServer, DEFAULT_API_PORT } = require('./agent-api.cjs');
 
-let mainWindow;
-let activeDownload = null;
+const LOGIN_SITES = core.LOGIN_SITES;
+const SITE_IDS = core.SITE_IDS;
 
-const LOGIN_SITES = {
-  douyin: {
-    id: 'douyin',
-    domains: ['douyin.com'],
-    title: '登录抖音',
-    homeUrl: 'https://www.douyin.com/',
-    partition: 'persist:qydouyin',
-    sessionCookieNames: ['sessionid', 'sessionid_ss', 'sid_guard'],
-    filePrefix: 'qingying-douyin-',
-    statusChannel: 'douyin:login-status',
-    loginRequired: true,
-    loginPrompt: '请先点击“抖音内容需要先登录”，完成登录后再解析。',
-    reloginPrompt: '抖音登录已失效，请重新登录。'
-  },
-  tiktok: {
-    id: 'tiktok',
-    domains: ['tiktok.com'],
-    title: '登录 TikTok',
-    homeUrl: 'https://www.tiktok.com/',
-    partition: 'persist:qytiktok',
-    sessionCookieNames: ['sessionid', 'sessionid_ss', 'sid_guard'],
-    filePrefix: 'qingying-tiktok-',
-    statusChannel: 'tiktok:login-status',
-    loginRequired: false,
-    loginPrompt: 'TikTok 部分内容需要登录，请先点击“登录 TikTok”后再解析。',
-    reloginPrompt: 'TikTok 登录已失效，请重新登录。',
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'
-  },
-  bilibili: {
-    id: 'bilibili',
-    domains: ['bilibili.com', 'b23.tv'],
-    title: '登录哔哩哔哩',
-    homeUrl: 'https://www.bilibili.com/',
-    partition: 'persist:qybilibili',
-    sessionCookieNames: ['SESSDATA', 'DedeUserID'],
-    filePrefix: 'qingying-bilibili-',
-    statusChannel: 'bilibili:login-status',
-    loginRequired: false,
-    loginPrompt: '请先点击“登录哔哩哔哩”，完成登录后再解析。',
-    reloginPrompt: '哔哩哔哩登录已失效，请重新登录。',
-    cookieHint: '哔哩哔哩风控较严，建议先点击“登录哔哩哔哩”，在弹出的窗口中打开过站点后再重试。'
-  },
-  xiaohongshu: {
-    id: 'xiaohongshu',
-    domains: ['xiaohongshu.com', 'xhslink.com'],
-    title: '登录小红书',
-    homeUrl: 'https://www.xiaohongshu.com/',
-    partition: 'persist:qyxhs',
-    sessionCookieNames: ['web_session'],
-    filePrefix: 'qingying-xhs-',
-    statusChannel: 'xiaohongshu:login-status',
-    loginRequired: false,
-    loginPrompt: '请先点击“登录小红书”，完成登录后再解析。',
-    reloginPrompt: '小红书登录已失效，请重新登录。',
-    cookieHint: '小红书部分内容需要登录，建议先点击“登录小红书”，在弹出的窗口中打开过站点后再重试。'
-  },
-  instagram: {
-    id: 'instagram',
-    domains: ['instagram.com', 'instagr.am', 'ddinstagram.com'],
-    title: '登录 Instagram',
-    homeUrl: 'https://www.instagram.com/',
-    partition: 'persist:qyinsta',
-    sessionCookieNames: ['sessionid', 'ds_user_id'],
-    filePrefix: 'qingying-instagram-',
-    statusChannel: 'instagram:login-status',
-    loginRequired: false,
-    loginPrompt: 'Instagram 需要登录后才能获取内容，请先点击“登录 Instagram”完成登录。',
-    reloginPrompt: 'Instagram 登录已失效，请重新登录。',
-    cookieHint: 'Instagram 现在强制要求登录，请先点击“登录 Instagram”完成登录后重试。'
-  }
-};
+let mainWindow;
+let enginesCache = null;
 const loginWindows = {};
+
+// ── 本机数据目录（全部在 userData，仓库里没有）─────────────────────────────
+const DATA_DIR = () => path.join(app.getPath('userData'), 'qingying');
+const TEMP_DIR = () => app.getPath('temp');
 
 function sendToMain(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -90,10 +23,10 @@ function sendToMain(channel, payload) {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1120,
-    height: 780,
-    minWidth: 780,
-    minHeight: 620,
+    width: 1180,
+    height: 820,
+    minWidth: 800,
+    minHeight: 640,
     show: false,
     title: '清影下载器',
     icon: path.join(__dirname, '..', 'renderer', 'assets', 'app-icon.png'),
@@ -105,8 +38,8 @@ function createWindow() {
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
-      webSecurity: true
-    }
+      webSecurity: true,
+    },
   });
 
   for (const ev of ['maximize', 'unmaximize']) {
@@ -122,44 +55,636 @@ function createWindow() {
   });
 }
 
-function isHttpUrl(value) {
+// ── 引擎位置 ──────────────────────────────────────────────────────────────
+function engineOptions() {
+  const overrides = {};
+  const roots = [];
+  if (app.isPackaged) {
+    const bin = path.join(process.resourcesPath, 'bin');
+    overrides['yt-dlp'] = path.join(bin, 'yt-dlp.exe');
+    overrides['gallery-dl'] = path.join(bin, 'gallery-dl.exe');
+    overrides['ffmpeg'] = path.join(bin, 'ffmpeg.exe');
+  } else {
+    roots.push(path.join(app.getAppPath(), 'resources', 'bin'));
+    roots.push(path.join(app.getAppPath(), 'resources'));
+  }
+  // 用户在设置里指定的引擎目录（例如安装包里的 resources/bin）。
+  const configured = core.readSettings(DATA_DIR()).enginesDir;
+  if (configured) roots.unshift(configured);
+  return { overrides, extraRoots: roots };
+}
+
+function ffmpegLocation() {
+  const resolved = core.resolveEnginePath('ffmpeg', engineOptions());
+  if (resolved) return resolved.path;
   try {
-    const parsed = new URL(value);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    const staticFfmpeg = require('ffmpeg-static');
+    if (staticFfmpeg) return staticFfmpeg;
+  } catch {}
+  return 'ffmpeg';
+}
+
+async function probeEngines() {
+  enginesCache = await core.probeEngines(engineOptions());
+  return enginesCache;
+}
+
+// ── 登录态：Cookie 只在进程内出现，落盘的只有状态摘要 ───────────────────────
+async function siteCookies(site) {
+  try {
+    return await session.fromPartition(site.partition).cookies.get({});
+  } catch {
+    return [];
+  }
+}
+
+async function cookieFileForSite(site) {
+  if (!site) return '';
+  return core.writeTempCookieFile(site, await siteCookies(site), TEMP_DIR());
+}
+
+function releaseCookieFile(file) {
+  return core.removeCookieFile(file, TEMP_DIR());
+}
+
+async function collectAuthSnapshot() {
+  const sites = {};
+  for (const siteId of SITE_IDS) {
+    const site = LOGIN_SITES[siteId];
+    const summary = core.summarizeLoginCookies(site, await siteCookies(site));
+    // 分区目录存在 = 这个站点在这个应用里开过登录窗口（没有分区就是从没碰过）。
+    let hasPartition = false;
+    try {
+      hasPartition = fs.existsSync(path.join(app.getPath('userData'), 'Partitions', site.partition.replace('persist:', '')));
+    } catch {}
+    sites[siteId] = {
+      logged_in: summary.loggedIn,
+      matched_cookie_names: summary.matchedCookieNames,
+      cookie_count: summary.cookieCount,
+      expired_detected: summary.expiredDetected,
+      expires_at: summary.earliestExpiry,
+      label: site.label,
+      login_required: site.loginRequired,
+      home_url: site.homeUrl,
+      has_partition: hasPartition,
+      exported: Boolean(core.exportedCookieFile(DATA_DIR(), siteId)),
+      checked_at: new Date().toISOString(),
+    };
+  }
+  const snapshot = { sites, updated_at: new Date().toISOString(), source: 'electron_session' };
+  core.writeAuthState(DATA_DIR(), snapshot);
+  return snapshot;
+}
+
+// ── 解析 ──────────────────────────────────────────────────────────────────
+async function analyzeMedia(payload) {
+  const url = safeUrl(payload?.url);
+  if (!url) return { ok: false, error: '请输入有效的 http/https 网址。', kind: 'bad_url' };
+  const engines = enginesCache || (await probeEngines());
+  const settings = core.readSettings(DATA_DIR());
+  // cookieProvider 交出去的临时文件由调用方负责删除（core 不猜测文件生命周期）。
+  const createdCookies = [];
+  let result;
+  try {
+    result = await core.analyzeUrl({
+      url,
+      engines,
+      preference: core.safeText(payload?.engine_preference, 20) || settings.enginePreference,
+      cookieProvider: async (site) => {
+        const file = await cookieFileForSite(site);
+        if (file) createdCookies.push(file);
+        return file;
+      },
+      fetchThumbnail: (target, init) => net.fetch(target, init),
+    });
+  } finally {
+    for (const file of createdCookies) releaseCookieFile(file);
+  }
+  if (result.ok) emitEngines();
+  return result;
+}
+
+function safeUrl(value) {
+  const text = core.safeText(value, 4096).trim();
+  return core.isHttpUrl(text) ? core.normalizeMediaUrl(text) : '';
+}
+
+// ── 下载队列 ──────────────────────────────────────────────────────────────
+// 状态机：queued -> downloading -> (done | failed | cancelled | paused)
+// retrying 是 downloading 的延迟重排，不算独立状态但会显示次数。
+// 暂停 = 终止引擎进程并保留 .part 分片；继续 = 用同一批参数重跑，yt-dlp 的
+// --continue 会接着已下载的分片走，不是从头再来。
+const tasks = new Map();
+const taskOrder = [];
+let runningCount = 0;
+let taskSeq = 0;
+
+const NON_RETRYABLE = new Set(['login_required', 'engine_missing', 'bad_url', 'needs_login']);
+
+function makeTask(input) {
+  taskSeq += 1;
+  const settings = core.readSettings(DATA_DIR());
+  const id = 'q' + Date.now().toString(36) + '-' + taskSeq;
+  const task = {
+    id,
+    url: safeUrl(input.url),
+    title: core.safeText(input.title, 300) || '未命名内容',
+    mode: core.DOWNLOAD_MODES.includes(input.mode) ? input.mode : 'combined',
+    videoId: core.safeText(input.videoId, 80),
+    videoExt: core.safeExt(input.videoExt),
+    videoHasAudio: input.videoHasAudio === true,
+    audioId: core.safeText(input.audioId, 80),
+    audioExt: core.safeExt(input.audioExt),
+    audioFormat: core.AUDIO_FORMATS.includes(input.audioFormat) ? input.audioFormat : settings.audioFormat,
+    images: Array.isArray(input.images) ? input.images.slice(0, 500) : [],
+    engine: ['yt-dlp', 'gallery-dl'].includes(input.engine) ? input.engine : '',
+    site: LOGIN_SITES[input.site] ? input.site : '',
+    outputDir: core.safeText(input.outputDir, 1024).trim() || settings.outputDir,
+    status: 'queued',
+    progress: { percent: '', speed: '', eta: '' },
+    attempts: 0,
+    max_attempts: 1 + core.clampInt(settings.autoRetry, 0, 5, 2),
+    error: '',
+    kind: '',
+    remedies: [],
+    files: [],
+    bytes: 0,
+    log: '',
+    used_engine: '',
+    created_at: new Date().toISOString(),
+    started_at: '',
+    finished_at: '',
+    runner: null,
+    timer: null,
+  };
+  tasks.set(id, task);
+  taskOrder.push(id);
+  while (taskOrder.length > 200) {
+    const drop = taskOrder.shift();
+    if (drop !== id) tasks.delete(drop);
+  }
+  return task;
+}
+
+function taskView(task) {
+  return {
+    id: task.id,
+    url: task.url,
+    title: task.title,
+    mode: task.mode,
+    engine: task.engine || '自动',
+    used_engine: task.used_engine,
+    site: task.site,
+    status: task.status,
+    progress: task.progress,
+    attempts: task.attempts,
+    max_attempts: task.max_attempts,
+    error: task.error,
+    kind: task.kind,
+    remedies: task.remedies,
+    file_count: task.files.length,
+    files: task.files.slice(0, 12),
+    bytes: task.bytes,
+    size_text: core.formatBytes(task.bytes) || '',
+    output_dir: task.outputDir,
+    created_at: task.created_at,
+    started_at: task.started_at,
+    finished_at: task.finished_at,
+    log_tail: core.safeText(task.log, 400),
+  };
+}
+
+function queueSnapshot() {
+  return {
+    tasks: taskOrder.map((id) => tasks.get(id)).filter(Boolean).map(taskView),
+    running: runningCount,
+    limit: core.readSettings(DATA_DIR()).concurrency,
+    settings: publicSettings(),
+    engines: enginesCache,
+  };
+}
+
+let emitTimer = null;
+function emitQueue(immediate = false) {
+  const send = () => {
+    emitTimer = null;
+    sendToMain('queue:changed', queueSnapshot());
+  };
+  if (immediate) {
+    if (emitTimer) clearTimeout(emitTimer);
+    emitTimer = null;
+    send();
+    return;
+  }
+  if (emitTimer) return;
+  emitTimer = setTimeout(send, 160);
+}
+
+function emitEngines() {
+  sendToMain('engines:changed', enginesCache);
+}
+
+function publicSettings() {
+  const settings = core.readSettings(DATA_DIR());
+  return {
+    ...settings,
+    cookie_export_available: SITE_IDS.filter((id) => core.exportedCookieFile(DATA_DIR(), id)).length,
+    data_dir: DATA_DIR(),
+  };
+}
+
+function pumpQueue() {
+  const limit = core.readSettings(DATA_DIR()).concurrency;
+  while (runningCount < limit) {
+    const next = taskOrder.map((id) => tasks.get(id)).find((task) => task && task.status === 'queued');
+    if (!next) break;
+    void runTask(next);
+  }
+  emitQueue();
+}
+
+function validateTaskTarget(task) {
+  if (!task.url) return '网址无效。';
+  if (!core.isHttpUrl(task.url)) return '网址无效。';
+  const site = task.site ? LOGIN_SITES[task.site] : null;
+  if (site && !core.isSiteUrl(task.url, site)) return '网址与所选站点不匹配。';
+  try {
+    if (!path.isAbsolute(task.outputDir) || !fs.statSync(task.outputDir).isDirectory()) {
+      return '请选择有效的下载目录。';
+    }
+  } catch {
+    return '请选择有效的下载目录。';
+  }
+  if (task.mode !== 'images' && task.mode !== 'audio' && !task.videoId) return '请选择视频画质。';
+  if (task.mode === 'audio' && !task.audioId) return '请选择音频轨道。';
+  if (task.mode === 'combined' && !task.videoHasAudio && !task.audioId) return '请选择用于合并的音频轨道。';
+  return '';
+}
+
+async function runTask(task) {
+  if (task.status !== 'queued') return;
+  const problem = validateTaskTarget(task);
+  if (problem) {
+    task.status = 'failed';
+    task.error = problem;
+    task.kind = 'bad_input';
+    task.finished_at = new Date().toISOString();
+    recordHistory(task);
+    emitQueue(true);
+    return;
+  }
+
+  runningCount += 1;
+  task.attempts += 1;
+  task.status = 'downloading';
+  task.error = '';
+  task.kind = '';
+  task.started_at = new Date().toISOString();
+  emitQueue(true);
+
+  const site = task.site ? LOGIN_SITES[task.site] : null;
+  const cookieFile = await cookieFileForSite(site);
+  const settings = core.readSettings(DATA_DIR());
+  const engines = enginesCache || (await probeEngines());
+  const opts = engineOptions();
+  const hooks = {
+    onChild: (state) => {
+      task.runner = state;
+    },
+    onProgress: (payload) => {
+      task.progress = {
+        percent: core.safeText(payload.percent, 20).trim(),
+        speed: core.safeText(payload.speed, 30).trim(),
+        eta: core.safeText(payload.eta, 30).trim(),
+      };
+      emitQueue();
+    },
+    onLog: (line) => {
+      task.log = core.appendTail(task.log, line + '\n', 4000);
+    },
+  };
+
+  const commonSpec = {
+    url: task.url,
+    outputDir: task.outputDir,
+    site,
+    cookieFile,
+    engineOptions: opts,
+    ffmpegLocation: ffmpegLocation(),
+    filenameTemplate: settings.filenameTemplate,
+    subfolderByPost: settings.subfolderByPost,
+    retries: 20,
+    concurrentFragments: 3,
+  };
+
+  let result;
+  try {
+    if (task.mode === 'images') {
+      const wantGallery = (task.engine === 'gallery-dl' || settings.enginePreference === 'gallery-dl')
+        && engines.gallery_dl?.available;
+      if (wantGallery) {
+        result = await core.runGalleryDlDownload({ url: task.url, outputDir: task.outputDir, site, cookieFile }, hooks);
+      } else {
+        const cookieHeader = site ? core.buildCookieHeader(site, await siteCookies(site), task.url) : '';
+        result = await core.runImageListDownload({
+          url: task.url,
+          outputDir: task.outputDir,
+          images: task.images,
+          title: task.title,
+          subfolder: settings.subfolderByPost,
+          cookieHeader,
+          refererOrigin: safeOrigin(task.url),
+        }, hooks);
+      }
+    } else {
+      if (!engines.yt_dlp?.available) {
+        result = { ok: false, kind: 'engine_missing', error: '本机找不到 yt-dlp，无法下载视频或音频。', files: [], bytes: 0 };
+      } else {
+        result = await core.runEngineDownload({
+          ...commonSpec,
+          mode: task.mode,
+          videoId: task.videoId,
+          videoExt: task.videoExt,
+          videoHasAudio: task.videoHasAudio,
+          audioId: task.audioId,
+          audioExt: task.audioExt,
+          audioFormat: task.audioFormat,
+        }, hooks);
+      }
+    }
+  } catch (error) {
+    result = { ok: false, error: core.safeText(error?.message, 600), files: [], bytes: 0 };
+  } finally {
+    releaseCookieFile(cookieFile);
+    runningCount = Math.max(0, runningCount - 1);
+    task.runner = null;
+  }
+
+  task.files = result.files || [];
+  task.bytes = Number(result.bytes) || 0;
+  task.used_engine = result.engine || (task.mode === 'images' ? '内置取图器' : 'yt-dlp');
+
+  if (result.ok) {
+    task.status = 'done';
+    task.progress = { percent: '100%', speed: '', eta: '' };
+    task.finished_at = new Date().toISOString();
+    recordHistory(task);
+    emitQueue(true);
+    pumpQueue();
+    return;
+  }
+
+  if (result.cancelled) {
+    task.status = result.paused ? 'paused' : 'cancelled';
+    if (task.status === 'paused') task.progress = { percent: task.progress.percent, speed: '', eta: '已暂停，分片保留在原目录' };
+    task.finished_at = new Date().toISOString();
+    recordHistory(task);
+    emitQueue(true);
+    pumpQueue();
+    return;
+  }
+
+  task.error = result.error || '下载失败。';
+  task.kind = result.kind || 'unknown';
+  task.remedies = result.remedies || [];
+  const retriable = !NON_RETRYABLE.has(task.kind) && task.attempts < task.max_attempts;
+  if (retriable) {
+    const delayMs = 2000 * task.attempts;
+    task.status = 'queued';
+    task.progress = { percent: task.progress.percent, speed: '', eta: `${delayMs / 1000} 秒后自动重试（第 ${task.attempts + 1}/${task.max_attempts} 次）` };
+    task.timer = setTimeout(() => {
+      task.timer = null;
+      pumpQueue();
+    }, delayMs);
+    emitQueue(true);
+    pumpQueue();
+    return;
+  }
+
+  task.status = 'failed';
+  task.finished_at = new Date().toISOString();
+  recordHistory(task);
+  emitQueue(true);
+  pumpQueue();
+}
+
+function safeOrigin(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return '';
+  }
+}
+
+function recordHistory(task) {
+  try {
+    core.appendHistory(DATA_DIR(), {
+      id: task.id,
+      url: task.url,
+      title: task.title,
+      engine: task.used_engine || task.engine,
+      mode: task.mode,
+      site: task.site,
+      status: task.status,
+      outputDir: task.outputDir,
+      files: task.files,
+      bytes: task.bytes,
+      error: task.error,
+      attempts: task.attempts,
+      finished_at: task.finished_at,
+    });
+  } catch {}
+}
+
+function stopTask(task, { pause }) {
+  if (!task) return false;
+  if (task.timer) {
+    clearTimeout(task.timer);
+    task.timer = null;
+  }
+  if (task.status === 'queued') {
+    task.status = pause ? 'paused' : 'cancelled';
+    task.finished_at = new Date().toISOString();
+    emitQueue(true);
+    pumpQueue();
+    return true;
+  }
+  if (task.status !== 'downloading') return false;
+  if (task.runner) {
+    task.runner.cancelled = true;
+    task.runner.paused = Boolean(pause);
+    core.terminateProcessTree(task.runner.child);
+  }
+  return true;
+}
+
+// ── IPC ───────────────────────────────────────────────────────────────────
+ipcMain.handle('app:get-info', () => ({
+  version: app.getVersion(),
+  platform: process.platform,
+  data_dir: DATA_DIR(),
+  packaged: app.isPackaged,
+}));
+
+ipcMain.handle('clipboard:read', () => core.safeText(clipboard.readText(), 4096));
+
+ipcMain.handle('clipboard:write', (_event, payload) => {
+  clipboard.writeText(core.safeText(payload?.text, 64 * 1024));
+  return true;
+});
+
+ipcMain.handle('dialog:choose-folder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'createDirectory'],
+    title: '选择下载目录',
+  });
+  return result.canceled ? null : result.filePaths[0];
+});
+
+ipcMain.handle('folder:open', async (_event, payload) => {
+  const folder = core.safeText(payload?.folder, 1024);
+  try {
+    if (!folder || !path.isAbsolute(folder) || !fs.statSync(folder).isDirectory()) return false;
   } catch {
     return false;
   }
-}
+  return (await shell.openPath(folder)) === '';
+});
 
-function normalizeMediaUrl(value) {
-  const parsed = new URL(value);
-  const hostname = parsed.hostname.toLowerCase();
-  const isDouyin = hostname === 'douyin.com' || hostname.endsWith('.douyin.com');
-  const modalId = parsed.searchParams.get('modal_id');
-  if (isDouyin && modalId && /^\d{10,25}$/.test(modalId)) {
-    return `https://www.douyin.com/video/${modalId}`;
+ipcMain.handle('file:reveal', async (_event, payload) => {
+  const file = core.safeText(payload?.file, 1024);
+  if (!file || !path.isAbsolute(file) || !fs.existsSync(file)) return false;
+  shell.showItemInFolder(file);
+  return true;
+});
+
+ipcMain.handle('external:open', (_event, payload) => {
+  const target = core.safeText(payload?.url, 2048).trim();
+  if (!core.isHttpUrl(target)) return false;
+  void shell.openExternal(target);
+  return true;
+});
+
+ipcMain.handle('engines:probe', async () => {
+  await probeEngines();
+  emitEngines();
+  return enginesCache;
+});
+
+ipcMain.handle('settings:get', () => publicSettings());
+
+ipcMain.handle('settings:set', async (_event, payload) => {
+  const patch = payload && typeof payload === 'object' ? payload : {};
+  const allowed = {};
+  if (typeof patch.outputDir === 'string') allowed.outputDir = core.safeText(patch.outputDir, 1024);
+  if (typeof patch.filenameTemplate === 'string') allowed.filenameTemplate = core.safeText(patch.filenameTemplate, 200);
+  if (typeof patch.subfolderByPost === 'boolean') allowed.subfolderByPost = patch.subfolderByPost;
+  if (patch.concurrency !== undefined) allowed.concurrency = patch.concurrency;
+  if (patch.autoRetry !== undefined) allowed.autoRetry = patch.autoRetry;
+  if (typeof patch.enginePreference === 'string') allowed.enginePreference = patch.enginePreference;
+  if (typeof patch.audioFormat === 'string') allowed.audioFormat = patch.audioFormat;
+  if (typeof patch.exportCookiesForCli === 'boolean') allowed.exportCookiesForCli = patch.exportCookiesForCli;
+  if (typeof patch.enginesDir === 'string') allowed.enginesDir = core.safeText(patch.enginesDir, 1024);
+  const saved = core.writeSettings(DATA_DIR(), allowed);
+  if ('enginesDir' in allowed) {
+    await probeEngines();
+    emitEngines();
   }
-  return parsed.toString();
-}
-
-function isSiteUrl(value, site) {
-  try {
-    const hostname = new URL(value).hostname.toLowerCase();
-    return site.domains.some((domain) =>
-      hostname === domain || hostname.endsWith(`.${domain}`)
-    );
-  } catch {
-    return false;
+  const merged = publicSettings();
+  if (saved.filename_template_error) {
+    return { ok: false, error: saved.filename_template_error, settings: merged };
   }
-}
+  emitQueue(true);
+  return { ok: true, settings: merged };
+});
 
-function matchLoginSite(value) {
-  for (const site of Object.values(LOGIN_SITES)) {
-    if (isSiteUrl(value, site)) return site;
+ipcMain.handle('template:preview', (_event, payload) => {
+  const template = core.safeText(payload?.template, 200);
+  const check = core.validateFilenameTemplate(template);
+  if (!check.ok) return { ok: false, error: check.error };
+  const sample = payload?.sample && typeof payload.sample === 'object' ? payload.sample : {};
+  return { ok: true, preview: core.previewFilename(template, { title: '示例标题', id: 'BV1xx4y1A', ext: 'mp4', ...sample }) };
+});
+
+ipcMain.handle('history:list', () => ({ items: core.readHistory(DATA_DIR()) }));
+ipcMain.handle('history:clear', () => {
+  core.clearHistory(DATA_DIR());
+  return { items: [] };
+});
+
+ipcMain.handle('media:analyze', (_event, payload) => analyzeMedia(payload));
+
+ipcMain.handle('queue:submit', (_event, payload) => {
+  const items = Array.isArray(payload?.items) ? payload.items.slice(0, 50) : [payload || {}];
+  const created = [];
+  for (const item of items) {
+    const task = makeTask(item);
+    created.push(taskView(task));
   }
-  return null;
-}
+  pumpQueue();
+  return { ok: true, tasks: created };
+});
 
+ipcMain.handle('queue:pause', (_event, payload) => {
+  const task = tasks.get(core.safeText(payload?.id, 40));
+  return stopTask(task, { pause: true });
+});
+
+ipcMain.handle('queue:resume', (_event, payload) => {
+  const task = tasks.get(core.safeText(payload?.id, 40));
+  if (!task || (task.status !== 'paused' && task.status !== 'cancelled' && task.status !== 'failed')) return false;
+  task.status = 'queued';
+  task.error = '';
+  task.kind = '';
+  task.remedies = [];
+  task.progress = { percent: '', speed: '', eta: '' };
+  pumpQueue();
+  return true;
+});
+
+ipcMain.handle('queue:retry', (_event, payload) => {
+  const task = tasks.get(core.safeText(payload?.id, 40));
+  if (!task || (task.status !== 'failed' && task.status !== 'cancelled')) return false;
+  task.status = 'queued';
+  task.attempts = 0;
+  task.error = '';
+  task.kind = '';
+  pumpQueue();
+  return true;
+});
+
+ipcMain.handle('queue:cancel', (_event, payload) => {
+  const task = tasks.get(core.safeText(payload?.id, 40));
+  return stopTask(task, { pause: false });
+});
+
+ipcMain.handle('queue:remove', (_event, payload) => {
+  const id = core.safeText(payload?.id, 40);
+  const task = tasks.get(id);
+  if (!task) return false;
+  if (task.status === 'downloading') stopTask(task, { pause: false });
+  if (task.timer) clearTimeout(task.timer);
+  tasks.delete(id);
+  const index = taskOrder.indexOf(id);
+  if (index >= 0) taskOrder.splice(index, 1);
+  emitQueue(true);
+  return true;
+});
+
+ipcMain.handle('queue:clear-finished', () => {
+  const finished = taskOrder.filter((id) => ['done', 'cancelled'].includes(tasks.get(id)?.status));
+  for (const id of finished) {
+    tasks.delete(id);
+    const index = taskOrder.indexOf(id);
+    if (index >= 0) taskOrder.splice(index, 1);
+  }
+  emitQueue(true);
+  return { removed: finished.length };
+});
+
+ipcMain.handle('queue:list', () => queueSnapshot());
+
+// ── 登录窗口与登录态开关 ──────────────────────────────────────────────────
 function openLogin(site) {
   const existing = loginWindows[site.id];
   if (existing && !existing.isDestroyed()) {
@@ -178,820 +703,105 @@ function openLogin(site) {
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
-      webSecurity: true
-    }
+      webSecurity: true,
+    },
   });
   loginWindows[site.id] = loginWindow;
 
   loginWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   loginWindow.webContents.on('will-navigate', (event, targetUrl) => {
-    if (isSiteUrl(targetUrl, site)) return;
+    if (core.isSiteUrl(targetUrl, site)) return;
     event.preventDefault();
   });
+  // 站点登录成功常表现为 session cookie 出现；这里不轮询页面，只在窗口关闭时确认一次。
   loginWindow.loadURL(site.homeUrl);
   loginWindow.on('closed', async () => {
     delete loginWindows[site.id];
-    const cookies = await session.fromPartition(site.partition).cookies.get({});
-    const loggedIn = cookies.some((cookie) =>
-      isSiteCookie(cookie, site)
-      && site.sessionCookieNames.includes(cookie.name)
-    );
-    sendToMain(site.statusChannel, { loggedIn });
+    await refreshSiteStatus(site.id);
   });
 }
 
-function isSiteCookie(cookie, site) {
-  const cookieDomain = String(cookie.domain || '').replace(/^\./, '').toLowerCase();
-  return site.domains.some((domain) =>
-    cookieDomain === domain || cookieDomain.endsWith(`.${domain}`)
-  );
+async function refreshSiteStatus(siteId) {
+  const site = LOGIN_SITES[siteId];
+  if (!site) return null;
+  const snapshot = await collectAuthSnapshot();
+  sendToMain('auth:changed', snapshot);
+  return snapshot.sites[siteId] || null;
 }
 
-async function createSiteCookieFile(site) {
-  const cookies = await session.fromPartition(site.partition).cookies.get({});
-  const siteCookies = cookies.filter((cookie) => isSiteCookie(cookie, site));
-  if (!siteCookies.length) return '';
+ipcMain.handle('auth:status', async () => collectAuthSnapshot());
 
-  const lines = ['# Netscape HTTP Cookie File'];
-  for (const cookie of siteCookies) {
-    const domain = cookie.domain || `.${site.domains[0]}`;
-    const includeSubdomains = domain.startsWith('.') ? 'TRUE' : 'FALSE';
-    const secure = cookie.secure ? 'TRUE' : 'FALSE';
-    const expires = Math.max(0, Math.floor(cookie.expirationDate || 0));
-    const name = String(cookie.name || '').replace(/[\t\r\n]/g, '');
-    const value = String(cookie.value || '').replace(/[\t\r\n]/g, '');
-    lines.push([domain, includeSubdomains, cookie.path || '/', secure, expires, name, value].join('\t'));
-  }
+ipcMain.handle('auth:login', (_event, payload) => {
+  const site = LOGIN_SITES[core.safeText(payload?.site, 24)];
+  if (!site) return { ok: false, error: '未知站点。' };
+  openLogin(site);
+  return { ok: true, title: site.title };
+});
 
-  const cookiePath = path.join(
-    app.getPath('temp'),
-    `${site.filePrefix}${process.pid}-${Date.now()}.txt`
-  );
-  await fs.promises.writeFile(cookiePath, `${lines.join('\n')}\n`, {
-    encoding: 'utf8',
-    mode: 0o600
-  });
-  return cookiePath;
-}
-
-function deleteCookieFile(cookiePath) {
-  if (!cookiePath) return;
-  const tempRoot = path.resolve(app.getPath('temp'));
-  const resolved = path.resolve(cookiePath);
-  const filePrefixes = Object.values(LOGIN_SITES).map((site) => site.filePrefix);
-  if (
-    path.dirname(resolved) === tempRoot
-    && filePrefixes.some((prefix) => path.basename(resolved).startsWith(prefix))
-  ) {
-    try {
-      fs.unlinkSync(resolved);
-    } catch {}
-  }
-}
-
-function uniqueDownloadPath(dir, name, ext) {
-  let candidate = path.join(dir, `${name}.${ext}`);
-  let index = 1;
-  while (fs.existsSync(candidate)) {
-    candidate = path.join(dir, `${name} (${index}).${ext}`);
-    index += 1;
-  }
-  return candidate;
-}
-
-function fetchImageBuffer(url, headers, redirectCount = 0) {
-  return new Promise((resolve, reject) => {
-    if (redirectCount > 5) {
-      reject(new Error('重定向次数过多'));
-      return;
-    }
-    let parsed;
-    try {
-      parsed = new URL(url);
-    } catch {
-      reject(new Error('图片地址无效'));
-      return;
-    }
-    const request = (parsed.protocol === 'https:' ? https : require('node:http'))
-      .get(parsed, { headers }, (response) => {
-        const status = response.statusCode || 0;
-        if (status >= 300 && status < 400 && response.headers.location) {
-          response.resume();
-          fetchImageBuffer(new URL(response.headers.location, parsed).toString(), headers, redirectCount + 1)
-            .then(resolve, reject);
-          return;
-        }
-        if (status < 200 || status >= 300) {
-          response.resume();
-          reject(new Error(`HTTP ${status}`));
-          return;
-        }
-        const chunks = [];
-        let size = 0;
-        response.on('data', (chunk) => {
-          size += chunk.length;
-          if (size > 100 * 1024 * 1024) {
-            request.destroy(new Error('图片内容过大'));
-            return;
-          }
-          chunks.push(chunk);
-        });
-        response.on('end', () => resolve(Buffer.concat(chunks)));
-        response.on('error', reject);
-      });
-    request.setTimeout(30000, () => request.destroy(new Error('连接超时')));
-    request.on('error', reject);
-  });
-}
-
-function safeText(value, max = 2000) {
-  return typeof value === 'string' ? value.slice(0, max) : '';
-}
-
-function safeExt(value) {
-  const extension = safeText(value, 12).toLowerCase();
-  return /^[a-z0-9]+$/.test(extension) ? extension : '';
-}
-
-function toolPath(name) {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, 'bin', `${name}.exe`);
-  }
-  if (name === 'yt-dlp') {
-    const bundled = path.join(app.getAppPath(), 'resources', 'yt-dlp.exe');
-    return fs.existsSync(bundled) ? bundled : 'yt-dlp';
-  }
-  if (name === 'gallery-dl') {
-    const bundled = path.join(app.getAppPath(), 'resources', 'bin', 'gallery-dl.exe');
-    return fs.existsSync(bundled) ? bundled : 'gallery-dl';
-  }
-  const ffmpegStatic = require('ffmpeg-static');
-  return ffmpegStatic;
-}
-
-function terminateProcessTree(child) {
-  if (!child || child.exitCode !== null) return;
-  if (process.platform === 'win32' && child.pid) {
-    try {
-      const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
-        windowsHide: true,
-        shell: false,
-        stdio: 'ignore'
-      });
-      killer.once('error', () => {
-        try {
-          child.kill();
-        } catch {}
-      });
-      return;
-    } catch {}
-  }
+ipcMain.handle('auth:logout', async (_event, payload) => {
+  const siteId = core.safeText(payload?.site, 24);
+  const site = LOGIN_SITES[siteId];
+  if (!site) return { ok: false, error: '未知站点。' };
   try {
-    child.kill('SIGTERM');
-  } catch {}
-}
-
-function appendTail(current, addition, maxLength = 65536) {
-  const combined = current + addition;
-  return combined.length > maxLength ? combined.slice(-maxLength) : combined;
-}
-
-function runTool(executable, args, options = {}) {
-  const timeoutMs = options.timeoutMs || 120000;
-  const maxStdoutBytes = options.maxStdoutBytes || 32 * 1024 * 1024;
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, {
-      windowsHide: true,
-      shell: false,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-
-    let stdout = '';
-    let stderr = '';
-    let stdoutBytes = 0;
-    let finished = false;
-    let timedOut = false;
-    let outputTooLarge = false;
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      terminateProcessTree(child);
-    }, timeoutMs);
-
-    const finish = (callback) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      callback();
-    };
-
-    child.stdout.on('data', (chunk) => {
-      stdoutBytes += chunk.length;
-      if (stdoutBytes > maxStdoutBytes) {
-        outputTooLarge = true;
-        terminateProcessTree(child);
-        return;
-      }
-      stdout += chunk.toString('utf8');
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr = appendTail(stderr, chunk.toString('utf8'));
-    });
-    child.once('error', (error) => finish(() => reject(error)));
-    child.once('close', (code) => finish(() => {
-      if (timedOut) {
-        reject(new Error('连接超时，请检查网络后重试。'));
-      } else if (outputTooLarge) {
-        reject(new Error('解析结果过大，已停止处理。'));
-      } else if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        reject(new Error(stderr.trim() || `工具退出，代码 ${code}`));
-      }
+    const cookies = await siteCookies(site);
+    await Promise.all(cookies.filter((c) => core.isSiteCookie(c, site)).map((cookie) => {
+      const scheme = cookie.secure ? 'https://' : 'http://';
+      const domain = String(cookie.domain || '').replace(/^\./, '');
+      return session.fromPartition(site.partition).cookies.remove(
+        scheme + domain,
+        cookie.name,
+      ).catch(() => {});
     }));
-  });
-}
-
-function createLineConsumer(onLine) {
-  let remainder = '';
-  return {
-    push(chunk) {
-      const lines = `${remainder}${chunk}`.split(/\r?\n/);
-      remainder = lines.pop() || '';
-      lines.filter(Boolean).forEach(onLine);
-    },
-    flush() {
-      if (remainder) onLine(remainder);
-      remainder = '';
-    }
-  };
-}
-
-function formatSize(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return null;
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[unit]}`;
-}
-
-async function fetchImageDataUrl(url, referer) {
-  if (!isHttpUrl(url)) return '';
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
-  try {
-    const response = await net.fetch(url, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        ...(isHttpUrl(referer) ? { Referer: referer } : {})
-      }
-    });
-    if (!response.ok) return '';
-    const contentType = response.headers.get('content-type') || '';
-    if (!contentType.toLowerCase().startsWith('image/')) return '';
-    const declaredSize = Number(response.headers.get('content-length')) || 0;
-    if (declaredSize > 8 * 1024 * 1024) return '';
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (!bytes.length || bytes.length > 8 * 1024 * 1024) return '';
-    return `data:${contentType.split(';')[0]};base64,${bytes.toString('base64')}`;
-  } catch {
-    return '';
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function mapFormats(info) {
-  const formats = Array.isArray(info.formats) ? info.formats : [];
-  const videoExtensions = new Set(['mp4', 'webm', 'mkv', 'mov', 'm4v', 'flv', 'avi', 'ts', '3gp']);
-  const audioExtensions = new Set(['mp3', 'm4a', 'aac', 'opus', 'ogg', 'wav', 'flac']);
-  const hasUnknownCodecs = (format) => !format.vcodec && !format.acodec;
-  const rawVideos = formats
-    .filter((format) =>
-      (format.vcodec && format.vcodec !== 'none')
-      || (hasUnknownCodecs(format) && videoExtensions.has(String(format.ext).toLowerCase()))
-    )
-    .map((format) => {
-      const unknownMuxedSource = hasUnknownCodecs(format);
-      return {
-        id: String(format.format_id),
-        ext: format.ext || '',
-        resolution: format.resolution
-          || (format.height ? `${format.width || '?'}×${format.height}` : '源文件'),
-        height: Number(format.height) || 0,
-        fps: Number(format.fps) || 0,
-        codec: format.vcodec || '源编码',
-        hasAudio: unknownMuxedSource || Boolean(format.acodec && format.acodec !== 'none'),
-        size: formatSize(Number(format.filesize || format.filesize_approx)),
-        note: format.format_note || '',
-        score:
-          (format.acodec === 'none' ? 100000 : 0)
-          + (format.ext === 'mp4' ? 10000 : 0)
-          + (Number(format.fps) || 0) * 100
-          + (Number(format.tbr) || 0)
-      };
-    });
-
-  const bestVideoByHeight = new Map();
-  for (const item of rawVideos) {
-    const key = item.height || item.resolution || 'unknown';
-    const current = bestVideoByHeight.get(key);
-    if (!current || item.score > current.score) bestVideoByHeight.set(key, item);
-  }
-  const videos = [...bestVideoByHeight.values()]
-    .sort((a, b) => b.height - a.height || b.score - a.score)
-    .slice(0, 10)
-    .map(({ score, ...item }) => item);
-
-  const rawAudios = formats
-    .filter((format) =>
-      (
-        (!format.vcodec || format.vcodec === 'none')
-        && format.acodec
-        && format.acodec !== 'none'
-      )
-      || (hasUnknownCodecs(format) && audioExtensions.has(String(format.ext).toLowerCase()))
-    )
-    .map((format) => ({
-      id: String(format.format_id),
-      ext: format.ext || '',
-      codec: format.acodec || '',
-      abr: Number(format.abr) || 0,
-      size: formatSize(Number(format.filesize || format.filesize_approx)),
-      language: format.language || '',
-      note: format.format_note || ''
-    }))
-    .sort((a, b) => b.abr - a.abr);
-
-  const seenAudio = new Set();
-  const audios = rawAudios.filter((item) => {
-    const bitrateBand = item.abr ? Math.round(item.abr / 16) * 16 : 0;
-    const key = `${item.ext}|${item.codec}|${bitrateBand}|${item.language}`;
-    if (seenAudio.has(key)) return false;
-    seenAudio.add(key);
-    return true;
-  }).slice(0, 8);
-
-  return { videos, audios };
-}
-
-const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif']);
-
-function parseGalleryDlJson(stdout) {
-  let parsed;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(parsed)) return [];
-
-  const items = [];
-  let pending = null;
-  for (const entry of parsed) {
-    if (!Array.isArray(entry) || !entry.length) continue;
-    const [code, payload] = entry;
-    if (code === 2 && payload && typeof payload === 'object' && !Array.isArray(payload)) {
-      if (typeof payload.url === 'string' && isHttpUrl(payload.url)) {
-        items.push({ url: payload.url, ext: payload.extension, meta: payload });
-        pending = null;
-      } else {
-        pending = payload;
-      }
-    } else if (code === 3 && typeof payload === 'string' && isHttpUrl(payload)) {
-      const meta = pending || {};
-      const ext = meta.extension
-        || (payload.match(/\.([a-z0-9]{2,5})(?:[?#]|$)/i)?.[1] ?? '');
-      items.push({ url: payload, ext, meta });
-      pending = null;
-    }
-  }
-  return items
-    .map(({ url, ext, meta }) => ({
-      url,
-      ext: safeExt(ext) || 'jpg',
-      filename: safeText(meta.filename || '', 100),
-      width: Number(meta.width) || 0,
-      height: Number(meta.height) || 0
-    }))
-    .filter((item) => IMAGE_EXTENSIONS.has(item.ext));
-}
-
-async function analyzeImagesWithGalleryDl(url) {
-  const site = matchLoginSite(url);
-  let cookieFile = '';
-  try {
-    const args = ['-j', '--no-colors'];
-    if (site) {
-      cookieFile = await createSiteCookieFile(site);
-      if (cookieFile) args.push('--cookies', cookieFile);
-    }
-    args.push(url);
-
-    const { stdout } = await runTool(toolPath('gallery-dl'), args, { timeoutMs: 90000 });
-    const images = parseGalleryDlJson(stdout).slice(0, 200);
-    if (!images.length) return null;
-
-    return {
-      ok: true,
-      data: {
-        title: safeText(images[0].filename || '图片作品', 300),
-        uploader: '',
-        thumbnail: '',
-        duration: 0,
-        webpageUrl: url,
-        sessionSite: site?.id || '',
-        videos: [],
-        audios: [],
-        images
-      }
-    };
-  } catch {
-    return null;
-  } finally {
-    deleteCookieFile(cookieFile);
-  }
-}
-
-async function buildSiteCookieHeader(site, url) {
-  try {
-    const cookies = await session.fromPartition(site.partition).cookies.get({});
-    let target;
-    try {
-      target = new URL(url).hostname.toLowerCase();
-    } catch {
-      return '';
-    }
-    return cookies
-      .filter((cookie) => {
-        const domain = String(cookie.domain || '').replace(/^\./, '').toLowerCase();
-        return target === domain || target.endsWith(`.${domain}`);
-      })
-      .map((cookie) => `${cookie.name}=${cookie.value}`)
-      .join('; ');
-  } catch {
-    return '';
-  }
-}
-
-ipcMain.handle('app:get-info', () => ({
-  version: app.getVersion(),
-  platform: process.platform
-}));
-
-ipcMain.handle('clipboard:read', () => safeText(clipboard.readText(), 4096));
-
-ipcMain.handle('dialog:choose-folder', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ['openDirectory', 'createDirectory'],
-    title: '选择下载目录'
-  });
-  return result.canceled ? null : result.filePaths[0];
+  } catch {}
+  core.removeExportedCookies(DATA_DIR(), siteId);
+  const snapshot = await collectAuthSnapshot();
+  sendToMain('auth:changed', snapshot);
+  return { ok: true, snapshot };
 });
 
-ipcMain.handle('folder:open', async (_event, payload) => {
-  const folder = safeText(payload?.folder, 1024);
-  try {
-    if (!folder || !path.isAbsolute(folder) || !fs.statSync(folder).isDirectory()) return false;
-  } catch {
-    return false;
+// 导出登录态给命令行用（agent 走这条路读同一份会话）。开关只影响导出文件。
+ipcMain.handle('auth:export', async (_event, payload) => {
+  const siteId = core.safeText(payload?.site, 24);
+  const site = LOGIN_SITES[siteId];
+  if (!site) return { ok: false, error: '未知站点。' };
+  const enabled = payload?.enabled === true;
+  if (!enabled) {
+    core.removeExportedCookies(DATA_DIR(), siteId);
+    const snapshot = await collectAuthSnapshot();
+    sendToMain('auth:changed', snapshot);
+    return { ok: true, exported: false };
   }
-  return (await shell.openPath(folder)) === '';
+  const result = core.exportSiteCookies(DATA_DIR(), site, await siteCookies(site));
+  if (!result.ok) return result;
+  const snapshot = await collectAuthSnapshot();
+  sendToMain('auth:changed', snapshot);
+  return { ok: true, exported: true, path: result.path, cookie_count: result.cookie_count };
 });
 
-ipcMain.handle('douyin:login', () => {
-  openLogin(LOGIN_SITES.douyin);
-  return true;
-});
+// ── 供应用内 HTTP 接口（127.0.0.1:8392）复用：提交队列并等它跑完 ────────────
+const FINISHED_STATUSES = new Set(['done', 'failed', 'cancelled', 'paused']);
 
-ipcMain.handle('tiktok:login', () => {
-  openLogin(LOGIN_SITES.tiktok);
-  return true;
-});
-
-ipcMain.handle('instagram:login', () => {
-  openLogin(LOGIN_SITES.instagram);
-  return true;
-});
-
-ipcMain.handle('bilibili:login', () => {
-  openLogin(LOGIN_SITES.bilibili);
-  return true;
-});
-
-ipcMain.handle('xiaohongshu:login', () => {
-  openLogin(LOGIN_SITES.xiaohongshu);
-  return true;
-});
-
-async function analyzeMedia(payload) {
-  const inputUrl = safeText(payload?.url, 4096).trim();
-  const url = isHttpUrl(inputUrl) ? normalizeMediaUrl(inputUrl) : inputUrl;
-  if (!isHttpUrl(url)) {
-    return { ok: false, error: '请输入有效的 http/https 视频网址。' };
-  }
-
-  let cookieFile = '';
-  try {
-    const args = [
-      '--dump-single-json',
-      '--no-warnings',
-      '--no-colors',
-      '--no-playlist',
-      '--skip-download'
-    ];
-    const site = matchLoginSite(url);
-    if (site) {
-      if (site.userAgent) args.push('--user-agent', site.userAgent);
-      cookieFile = await createSiteCookieFile(site);
-      if (!cookieFile && site.loginRequired) {
-        throw new Error(site.loginPrompt);
-      }
-      if (cookieFile) args.push('--cookies', cookieFile);
-    }
-    args.push(url);
-
-    const { stdout } = await runTool(toolPath('yt-dlp'), args);
-    const info = JSON.parse(stdout);
-    const { videos, audios } = mapFormats(info);
-    if (!videos.length && !audios.length) {
-      // yt-dlp 能“解析”直链图片但没有可用的视频/音频格式，降级到 gallery-dl。
-      const fallback = await analyzeImagesWithGalleryDl(url);
-      if (fallback) return fallback;
-    }
-    const thumbnail = await fetchImageDataUrl(info.thumbnail || '', url);
-    return {
-      ok: true,
-      data: {
-        title: safeText(info.title || '未命名视频', 300),
-        uploader: safeText(info.uploader || info.channel || '', 200),
-        thumbnail,
-        duration: Number(info.duration) || 0,
-        webpageUrl: url,
-        sessionSite: site?.id || '',
-        videos,
-        audios
-      }
-    };
-  } catch (error) {
-    const fallback = await analyzeImagesWithGalleryDl(url);
-    if (fallback) return fallback;
-
-    let message = safeText(error?.message, 1200) || '解析失败，请稍后重试。';
-    const site = matchLoginSite(url);
-    if (site?.cookieHint && !cookieFile) {
-      message = `${message}（提示：${site.cookieHint}）`;
-    }
-    return {
-      ok: false,
-      error: message
-    };
-  } finally {
-    deleteCookieFile(cookieFile);
-  }
-}
-
-ipcMain.handle('media:analyze', (_event, payload) => analyzeMedia(payload));
-
-async function downloadMedia(payload) {
-  if (activeDownload) {
-    return { ok: false, error: '已有下载任务正在进行。' };
-  }
-
-  const url = safeText(payload?.url, 4096).trim();
-  const outputDir = safeText(payload?.outputDir, 1024);
-  const mode = ['combined', 'video', 'audio', 'images'].includes(payload?.mode) ? payload.mode : '';
-  const videoId = safeText(payload?.videoId, 80);
-  const audioId = safeText(payload?.audioId, 80);
-  const videoExt = safeExt(payload?.videoExt);
-  const audioExt = safeExt(payload?.audioExt);
-  const videoHasAudio = payload?.videoHasAudio === true;
-  const audioFormat = ['mp3', 'm4a', 'opus', 'wav'].includes(payload?.audioFormat)
-    ? payload.audioFormat
-    : 'mp3';
-  const sessionSite = LOGIN_SITES[payload?.sessionSite] || null;
-
-  if (!isHttpUrl(url)) return { ok: false, error: '网址无效。' };
-  if (sessionSite && !isSiteUrl(url, sessionSite)) {
-    return { ok: false, error: '网址与所选站点不匹配。' };
-  }
-
-  try {
-    if (!path.isAbsolute(outputDir) || !fs.statSync(outputDir).isDirectory()) {
-      return { ok: false, error: '请选择有效的下载目录。' };
-    }
-  } catch {
-    return { ok: false, error: '请选择有效的下载目录。' };
-  }
-  if (!mode) return { ok: false, error: '请选择下载模式。' };
-
-  if (mode === 'images') {
-    const imageList = (Array.isArray(payload?.images) ? payload.images : [])
-      .map((item, index) => ({
-        url: safeText(item?.url, 4096).trim(),
-        ext: safeExt(item?.ext) || 'jpg',
-        index: index + 1
-      }))
-      .filter((item) => isHttpUrl(item.url))
-      .slice(0, 200);
-    if (!imageList.length) return { ok: false, error: '没有可下载的图片。' };
-    const baseName = safeText(payload?.title, 80)
-      .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '')
-      .trim() || 'image';
-
-    let cookieHeader = '';
-    if (sessionSite) cookieHeader = await buildSiteCookieHeader(sessionSite, url);
-
-    return new Promise((resolve) => {
-      let settled = false;
-      activeDownload = { cancelled: false, child: null };
-
-      const finish = (result) => {
-        if (settled) return;
-        settled = true;
-        activeDownload = null;
-        resolve(result);
-      };
-
-      (async () => {
-        const total = imageList.length;
-        for (const image of imageList) {
-          if (activeDownload?.cancelled) {
-            sendToMain('media:progress', { type: 'cancelled' });
-            finish({ ok: false, cancelled: true });
-            return;
-          }
-          const pct = Math.round(((image.index - 1) / total) * 100);
-          sendToMain('media:progress', {
-            type: 'progress',
-            percent: `${pct}%`,
-            speed: '',
-            eta: `第 ${image.index}/${total} 张`
-          });
-          try {
-            const buffer = await fetchImageBuffer(image.url, {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-              ...(cookieHeader ? { Cookie: cookieHeader } : {}),
-              Referer: `${new URL(url).origin}/`
-            });
-            if (!buffer.length) throw new Error('图片内容为空');
-            const fileName = `${baseName}-${String(image.index).padStart(2, '0')}`;
-            const destPath = uniqueDownloadPath(outputDir, fileName, image.ext);
-            await fs.promises.writeFile(destPath, buffer);
-          } catch (imageError) {
-            finish({
-              ok: false,
-              error: `第 ${image.index} 张图片下载失败：${safeText(imageError?.message, 200)}`
-            });
-            return;
-          }
-        }
-        sendToMain('media:progress', { type: 'done' });
-        finish({ ok: true });
-      })();
-    });
-  }
-
-  if (mode !== 'audio' && !videoId) return { ok: false, error: '请选择视频画质。' };
-  if (mode === 'audio' && !audioId) return { ok: false, error: '请选择音频轨道。' };
-  if (mode === 'combined' && !videoHasAudio && !audioId) {
-    return { ok: false, error: '请选择用于合并的音频轨道。' };
-  }
-
-  let cookieFile = '';
-  if (sessionSite) {
-    cookieFile = await createSiteCookieFile(sessionSite);
-    if (!cookieFile && sessionSite.loginRequired) {
-      return { ok: false, error: sessionSite.reloginPrompt };
-    }
-  }
-
-  const args = [
-    '--newline',
-    '--no-playlist',
-    '--no-warnings',
-    '--no-colors',
-    '--windows-filenames',
-    '--continue',
-    '--retries', '20',
-    '--fragment-retries', '20',
-    '--retry-sleep', '2',
-    '--socket-timeout', '30',
-    '--concurrent-fragments', '1',
-    '--ffmpeg-location', toolPath('ffmpeg'),
-    '--progress-template', 'download:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s',
-    '-o', path.join(outputDir, '%(title).180B [%(id)s].%(ext)s')
-  ];
-  if (sessionSite?.userAgent) args.push('--user-agent', sessionSite.userAgent);
-  if (cookieFile) args.push('--cookies', cookieFile);
-
-  if (mode === 'combined') {
-    if (videoHasAudio) {
-      args.push('-f', videoId);
-    } else {
-      const mp4Compatible =
-        videoExt === 'mp4' && ['m4a', 'mp4', 'aac'].includes(audioExt);
-      args.push(
-        '-f',
-        `${videoId}+${audioId}`,
-        '--merge-output-format',
-        mp4Compatible ? 'mp4' : 'mkv'
-      );
-    }
-  } else if (mode === 'video') {
-    args.push('-f', videoId);
-  } else {
-    args.push('-f', audioId, '-x', '--audio-format', audioFormat);
-  }
-  args.push(url);
-
+function downloadThroughQueue(payload) {
+  const task = makeTask(payload || {});
+  pumpQueue();
   return new Promise((resolve) => {
-    const child = spawn(toolPath('yt-dlp'), args, {
-      windowsHide: true,
-      shell: false,
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    const record = {
-      child,
-      cookieFile,
-      cancelled: false
-    };
-    activeDownload = record;
-
-    let errorText = '';
-    let settled = false;
-
-    const handleLine = (line, kind) => {
-      if (line.startsWith('download:')) {
-        const [percent, speed, eta] = line.slice(9).split('|');
-        sendToMain('media:progress', {
-          type: 'progress',
-          percent: safeText(percent, 20).trim(),
-          speed: safeText(speed, 30).trim(),
-          eta: safeText(eta, 30).trim()
-        });
-      } else {
-        sendToMain('media:progress', {
-          type: kind,
-          message: safeText(line, 500)
-        });
-      }
-    };
-
-    const stdoutLines = createLineConsumer((line) => handleLine(line, 'log'));
-    const stderrLines = createLineConsumer((line) => handleLine(line, 'log'));
-
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      stdoutLines.flush();
-      stderrLines.flush();
-      if (activeDownload === record) activeDownload = null;
-      deleteCookieFile(cookieFile);
-      resolve(result);
-    };
-
-    child.stdout.on('data', (chunk) => stdoutLines.push(chunk.toString('utf8')));
-    child.stderr.on('data', (chunk) => {
-      const text = chunk.toString('utf8');
-      errorText = appendTail(errorText, text);
-      stderrLines.push(text);
-    });
-    child.once('error', (error) => {
-      if (record.cancelled) {
-        sendToMain('media:progress', { type: 'cancelled' });
-        finish({ ok: false, cancelled: true });
-      } else {
-        finish({ ok: false, error: safeText(error.message, 1200) });
-      }
-    });
-    child.once('close', (code) => {
-      if (record.cancelled) {
-        sendToMain('media:progress', { type: 'cancelled' });
-        finish({ ok: false, cancelled: true });
-      } else if (code === 0) {
-        sendToMain('media:progress', { type: 'done' });
-        finish({ ok: true });
-      } else {
-        finish({
-          ok: false,
-          error: safeText(errorText.trim(), 1200) || `下载失败，代码 ${code}`
-        });
-      }
-    });
+    const poll = setInterval(() => {
+      emitQueue();
+      if (!FINISHED_STATUSES.has(task.status)) return;
+      clearInterval(poll);
+      resolve({
+        ok: task.status === 'done',
+        cancelled: task.status === 'cancelled' || task.status === 'paused',
+        error: task.error,
+        task_id: task.id,
+        data: { files: task.files, bytes: task.bytes, engine: task.used_engine },
+      });
+    }, 400);
+    poll.unref?.();
   });
 }
 
-ipcMain.handle('media:download', (_event, payload) => downloadMedia(payload));
-
-// ── 窗口控制（自绘标题栏）──
-
+// ── 窗口控制（自绘标题栏）───────────────────────────────────────────────
 ipcMain.handle('window:minimize', () => mainWindow?.minimize());
 ipcMain.handle('window:toggle-maximize', () => {
   if (!mainWindow) return false;
@@ -1003,15 +813,7 @@ ipcMain.handle('window:toggle-maximize', () => {
   return true;
 });
 ipcMain.handle('window:close', () => mainWindow?.close());
-ipcMain.handle('window:is-maximized', () => !!mainWindow?.isMaximized());
-
-ipcMain.handle('media:cancel', () => {
-  if (!activeDownload) return false;
-  if (activeDownload.cancelled) return true;
-  activeDownload.cancelled = true;
-  terminateProcessTree(activeDownload.child);
-  return true;
-});
+ipcMain.handle('window:is-maximized', () => Boolean(mainWindow?.isMaximized()));
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
@@ -1024,30 +826,40 @@ if (!hasSingleInstanceLock) {
     mainWindow.focus();
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     app.setAppUserModelId('com.qingying.downloader');
+    core.ensureDirSync(DATA_DIR());
     createWindow();
-    // Agent API：复用应用内解析/下载流程与各站点登录会话；端口被占用时静默跳过。
+    await probeEngines();
+    const snapshot = await collectAuthSnapshot();
+    sendToMain('auth:changed', snapshot);
+    emitEngines();
+    // 默认下载目录：用户没设过就落到"下载"，避免第一次点下载卡在"请选择目录"。
+    const settings = core.readSettings(DATA_DIR());
+    if (!settings.outputDir) {
+      core.writeSettings(DATA_DIR(), { outputDir: app.getPath('downloads') });
+      emitQueue(true);
+    }
     try {
       const apiPort = Number(process.env.QINGYING_API_PORT) || DEFAULT_API_PORT;
       const server = createAgentApiServer({
         analyzeMedia,
-        downloadMedia,
+        downloadMedia: downloadThroughQueue,
+        queueSnapshot,
         version: app.getVersion(),
       });
       server.on('error', () => {});
       server.listen(apiPort, '127.0.0.1', () => {
-        console.log(`[qingying-agent-api] listening on http://127.0.0.1:${apiPort}`);
+        console.log('[qingying-agent-api] listening on http://127.0.0.1:' + apiPort);
       });
     } catch (_) {}
   });
 }
 
 app.on('before-quit', () => {
-  if (activeDownload) {
-    activeDownload.cancelled = true;
-    deleteCookieFile(activeDownload.cookieFile);
-    terminateProcessTree(activeDownload.child);
+  for (const id of taskOrder) {
+    const task = tasks.get(id);
+    if (task && task.status === 'downloading') stopTask(task, { pause: false });
   }
 });
 

@@ -10,6 +10,9 @@ const path = require('node:path');
 
 const DEFAULT_API_PORT = 8392;
 
+// 输出目录核对由 engine core 负责（它按模板目录 + .part 过滤算出真实落盘文件），
+// 这里只做请求体读写与路由。需要 Agent 标准接口（/api/agent/tools 等）请用
+// agent/server.mjs —— 那个服务是无头的、复用同一个 electron/engine-core.cjs。
 function readBody(req, limit = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -44,23 +47,9 @@ function send(res, status, payload) {
   res.end(body);
 }
 
-// 输出目录快照差集：下载结束后报告新增的文件（yt-dlp/gallery-dl 不直接回传落盘路径）。
-function listDir(dir) {
-  try {
-    return fs.readdirSync(dir, { withFileTypes: true })
-      .filter((e) => e.isFile())
-      .map((e) => path.join(dir, e.name));
-  } catch (_) {
-    return [];
-  }
-}
-
-function diffFiles(before, after) {
-  const seen = new Set(before);
-  return after.filter((f) => !seen.has(f));
-}
-
-function createAgentApiServer({ analyzeMedia, downloadMedia, version = '' } = {}) {
+// 落盘核对（真实路径与字节数）由 engine core 在做，downloadMedia 走的是界面同一个队列，
+// 因此这里不再自己列目录做差集 —— 那只会算出第二套不一致的结果。
+function createAgentApiServer({ analyzeMedia, downloadMedia, queueSnapshot, version = '' } = {}) {
   async function handle(req, res) {
     const url = new URL(req.url, 'http://127.0.0.1');
     const route = `${req.method} ${url.pathname}`;
@@ -71,8 +60,11 @@ function createAgentApiServer({ analyzeMedia, downloadMedia, version = '' } = {}
         tool: 'qingying-downloader',
         version,
         engine: ['yt-dlp', 'gallery-dl'],
-        hint: 'POST /api/analyze {url}；POST /api/download {url, outputDir, mode, ...}',
+        hint: 'POST /api/analyze {url}；POST /api/download {url, outputDir, mode, ...}；GET /api/queue',
       });
+    }
+    if (route === 'GET /api/queue') {
+      return send(res, 200, { ok: true, data: typeof queueSnapshot === 'function' ? queueSnapshot() : null });
     }
     if (route === 'POST /api/analyze') {
       let body;
@@ -85,13 +77,11 @@ function createAgentApiServer({ analyzeMedia, downloadMedia, version = '' } = {}
       try { body = await readBody(req); } catch (e) { return send(res, 400, { ok: false, error: e.message }); }
       const outputDir = String(body.outputDir || '').trim();
       if (!outputDir) return send(res, 400, { ok: false, error: 'outputDir 不能为空' });
-      const before = listDir(outputDir);
       const result = await downloadMedia(body);
       if (!result.ok) return send(res, result.cancelled ? 409 : 502, result);
-      const files = diffFiles(before, listDir(outputDir));
-      return send(res, 200, { ...result, data: { files } });
+      return send(res, 200, result);
     }
-    return send(res, 404, { ok: false, error: `未知路由 ${route}，可用：GET /health、POST /api/analyze、POST /api/download` });
+    return send(res, 404, { ok: false, error: `未知路由 ${route}，可用：GET /health、GET /api/queue、POST /api/analyze、POST /api/download` });
   }
 
   return http.createServer((req, res) => {

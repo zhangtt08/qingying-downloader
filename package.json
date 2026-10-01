@@ -1,8 +1,15 @@
 {
   "name": "qingying-downloader",
-  "version": "1.4.0",
-  "description": "A secure Electron frontend for yt-dlp with separate video and audio format selection.",
+  "version": "1.5.0",
+  "description": "A secure Electron frontend for yt-dlp and gallery-dl with automatic engine routing, batch queue, per-site login sessions and a local Agent API.",
   "main": "electron/main.cjs",
   "author": "Codex",
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "check": "node scripts/check.cjs",
+    "agent:serve": "node agent/server.mjs",
+    "agent:mcp": "node agent/mcp-server.mjs",
+    "agent:check": "node scripts/agent-smoke.cjs"
+  }
 }

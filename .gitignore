@@ -1,0 +1,55 @@
+node_modules/
+.npm/
+
+# ── 构建 / 打包产物（Electron 运行时与安装包不属于源码）──
+dist/
+build/
+out/
+release/
+*.asar
+*.blockmap
+*.exe
+*.msi
+*.zip
+*.7z
+
+# ── 引擎二进制（yt-dlp.exe / gallery-dl.exe / ffmpeg.exe 随安装包分发）──
+/resources/
+
+# ── 运行时数据：Cookie / 登录态 / 下载历史一律不落仓库 ──
+# 实际位置见 README「数据放在本机哪里」一节（%APPDATA%/qingying-downloader/qingying/）
+.env
+.env.*
+auth-state.json
+history.json
+settings.json
+/cookies/
+*.cookies.txt
+*.cookie.txt
+
+# ── 本地 Agent 接口运行时 ─────────────────────────────
+agent/.endpoint
+agent/*.log
+
+# ── 日志与临时文件 ────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-error.log*
+/tmp/
+/temp/
+.cache/
+*.tmp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Python 侧工具脚本产物 ─────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ── 编辑器 ────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp

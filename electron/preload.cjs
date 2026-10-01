@@ -1,57 +1,60 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// 只暴露具名方法，不暴露 ipcRenderer 本身；渲染进程拿不到 node 能力。
+const invoke = (channel, payload) => ipcRenderer.invoke(channel, payload);
+
+function listener(channel, callback) {
+  const handler = (_event, payload) => callback(payload);
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+}
+
 contextBridge.exposeInMainWorld('qingying', {
-  getAppInfo: () => ipcRenderer.invoke('app:get-info'),
-  analyze: (url) => ipcRenderer.invoke('media:analyze', { url }),
-  openDouyinLogin: () => ipcRenderer.invoke('douyin:login'),
-  openTiktokLogin: () => ipcRenderer.invoke('tiktok:login'),
-  openBilibiliLogin: () => ipcRenderer.invoke('bilibili:login'),
-  openXiaohongshuLogin: () => ipcRenderer.invoke('xiaohongshu:login'),
-  openInstagramLogin: () => ipcRenderer.invoke('instagram:login'),
-  chooseFolder: () => ipcRenderer.invoke('dialog:choose-folder'),
-  readClipboard: () => ipcRenderer.invoke('clipboard:read'),
-  startDownload: (options) => ipcRenderer.invoke('media:download', options),
-  cancelDownload: () => ipcRenderer.invoke('media:cancel'),
-  openFolder: (folder) => ipcRenderer.invoke('folder:open', { folder }),
+  getAppInfo: () => invoke('app:get-info'),
+  readClipboard: () => invoke('clipboard:read'),
+
+  analyze: (url, enginePreference) => invoke('media:analyze', { url, engine_preference: enginePreference }),
+  writeClipboard: (text) => invoke('clipboard:write', { text }),
+
+  // 下载一律走队列：批量、并发、暂停、重试都在主进程一处管理。
+  submitQueue: (items, extra) => invoke('queue:submit', { items, ...(extra || {}) }),
+  listQueue: () => invoke('queue:list'),
+  pauseTask: (id) => invoke('queue:pause', { id }),
+  resumeTask: (id) => invoke('queue:resume', { id }),
+  retryTask: (id) => invoke('queue:retry', { id }),
+  cancelTask: (id) => invoke('queue:cancel', { id }),
+  removeTask: (id) => invoke('queue:remove', { id }),
+  clearFinished: () => invoke('queue:clear-finished'),
+
+  // 登录态：状态 + 登录 + 退出登录 + 导出给命令行（只回状态，绝不回 Cookie 值）
+  authStatus: () => invoke('auth:status'),
+  openLogin: (site) => invoke('auth:login', { site }),
+  logoutSite: (site) => invoke('auth:logout', { site }),
+  exportSiteCookies: (site, enabled) => invoke('auth:export', { site, enabled }),
+
+  enginesProbe: () => invoke('engines:probe'),
+
+  settingsGet: () => invoke('settings:get'),
+  settingsSet: (patch) => invoke('settings:set', patch),
+  previewTemplate: (template, sample) => invoke('template:preview', { template, sample }),
+
+  historyList: () => invoke('history:list'),
+  historyClear: () => invoke('history:clear'),
+
+  chooseFolder: () => invoke('dialog:choose-folder'),
+  openFolder: (folder) => invoke('folder:open', { folder }),
+  revealFile: (file) => invoke('file:reveal', { file }),
+  openExternal: (url) => invoke('external:open', { url }),
+
+  onQueueChanged: (callback) => listener('queue:changed', callback),
+  onAuthChanged: (callback) => listener('auth:changed', callback),
+  onEnginesChanged: (callback) => listener('engines:changed', callback),
+
   windowControls: {
-    minimize: () => ipcRenderer.invoke('window:minimize'),
-    toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
-    close: () => ipcRenderer.invoke('window:close'),
-    isMaximized: () => ipcRenderer.invoke('window:is-maximized'),
-    onMaximizedChange: (callback) => {
-      const handler = (_event, payload) => callback(payload);
-      ipcRenderer.on('window:maximized', handler);
-      return () => ipcRenderer.removeListener('window:maximized', handler);
-    },
+    minimize: () => invoke('window:minimize'),
+    toggleMaximize: () => invoke('window:toggle-maximize'),
+    close: () => invoke('window:close'),
+    isMaximized: () => invoke('window:is-maximized'),
+    onMaximizedChange: (callback) => listener('window:maximized', callback),
   },
-  onProgress: (callback) => {
-    const handler = (_event, payload) => callback(payload);
-    ipcRenderer.on('media:progress', handler);
-    return () => ipcRenderer.removeListener('media:progress', handler);
-  },
-  onDouyinLoginStatus: (callback) => {
-    const handler = (_event, payload) => callback(payload);
-    ipcRenderer.on('douyin:login-status', handler);
-    return () => ipcRenderer.removeListener('douyin:login-status', handler);
-  },
-  onTiktokLoginStatus: (callback) => {
-    const handler = (_event, payload) => callback(payload);
-    ipcRenderer.on('tiktok:login-status', handler);
-    return () => ipcRenderer.removeListener('tiktok:login-status', handler);
-  },
-  onBilibiliLoginStatus: (callback) => {
-    const handler = (_event, payload) => callback(payload);
-    ipcRenderer.on('bilibili:login-status', handler);
-    return () => ipcRenderer.removeListener('bilibili:login-status', handler);
-  },
-  onXiaohongshuLoginStatus: (callback) => {
-    const handler = (_event, payload) => callback(payload);
-    ipcRenderer.on('xiaohongshu:login-status', handler);
-    return () => ipcRenderer.removeListener('xiaohongshu:login-status', handler);
-  },
-  onInstagramLoginStatus: (callback) => {
-    const handler = (_event, payload) => callback(payload);
-    ipcRenderer.on('instagram:login-status', handler);
-    return () => ipcRenderer.removeListener('instagram:login-status', handler);
-  }
 });
