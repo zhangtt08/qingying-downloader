@@ -12,6 +12,18 @@
   </head>
   <body>
     <div class="app-frame">
+      <div class="win-controls" id="win-controls">
+        <button id="win-minimize" aria-label="最小化" title="最小化">
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor" stroke-width="1"/></svg>
+        </button>
+        <button id="win-maximize" aria-label="最大化" title="最大化 / 还原">
+          <svg class="icon-max" width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+          <svg class="icon-restore" width="10" height="10" viewBox="0 0 10 10" hidden><path d="M2.5 2.5V1h7v7H8" fill="none" stroke="currentColor" stroke-width="1"/><rect x="0.5" y="2.5" width="6.5" height="6.5" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+        </button>
+        <button id="win-close" aria-label="关闭" title="关闭">
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor" stroke-width="1"/></svg>
+        </button>
+      </div>
       <aside class="sidebar">
         <div class="brand">
           <img class="brand-icon" src="./assets/app-icon.png" alt="" />

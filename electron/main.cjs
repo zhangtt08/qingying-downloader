@@ -99,6 +99,7 @@ function createWindow() {
     icon: path.join(__dirname, '..', 'renderer', 'assets', 'app-icon.png'),
     backgroundColor: '#06101c',
     autoHideMenuBar: true,
+    frame: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -107,6 +108,10 @@ function createWindow() {
       webSecurity: true
     }
   });
+
+  for (const ev of ['maximize', 'unmaximize']) {
+    mainWindow.on(ev, () => mainWindow?.webContents.send('window:maximized', ev === 'maximize'));
+  }
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   mainWindow.once('ready-to-show', () => mainWindow?.show());
@@ -984,6 +989,21 @@ async function downloadMedia(payload) {
 }
 
 ipcMain.handle('media:download', (_event, payload) => downloadMedia(payload));
+
+// ── 窗口控制（自绘标题栏）──
+
+ipcMain.handle('window:minimize', () => mainWindow?.minimize());
+ipcMain.handle('window:toggle-maximize', () => {
+  if (!mainWindow) return false;
+  if (mainWindow.isMaximized()) {
+    mainWindow.unmaximize();
+    return false;
+  }
+  mainWindow.maximize();
+  return true;
+});
+ipcMain.handle('window:close', () => mainWindow?.close());
+ipcMain.handle('window:is-maximized', () => !!mainWindow?.isMaximized());
 
 ipcMain.handle('media:cancel', () => {
   if (!activeDownload) return false;

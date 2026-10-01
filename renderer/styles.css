@@ -62,6 +62,7 @@ svg {
 }
 
 .app-frame {
+  position: relative;
   width: min(1180px, 100%);
   min-height: 100vh;
   margin: 0 auto;
@@ -1004,4 +1005,50 @@ button:focus-visible {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ── 自绘窗口控制（标题栏内嵌三键）── */
+.win-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 50;
+  display: flex;
+  height: 34px;
+  -webkit-app-region: no-drag;
+}
+.win-controls button {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: rgba(226, 232, 244, 0.55);
+  cursor: default;
+  transition: background-color 150ms ease-out, color 150ms ease-out;
+}
+.win-controls button:hover {
+  background: rgba(148, 163, 184, 0.16);
+  color: #e2e8f4;
+}
+.win-controls #win-close:hover {
+  background: var(--danger, #cf3f4f);
+  color: #fff;
+}
+#win-maximize[aria-expanded="true"] .icon-max { display: none; }
+#win-maximize[aria-expanded="true"] .icon-restore { display: block; }
+
+/* 拖拽区：侧栏品牌块与工作区头部 */
+.brand,
+.workspace-header {
+  -webkit-app-region: drag;
+}
+.brand button,
+.workspace-header button,
+.workspace-header a,
+.workspace-header input,
+.workspace-header select {
+  -webkit-app-region: no-drag;
 }

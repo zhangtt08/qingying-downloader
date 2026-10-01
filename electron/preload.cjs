@@ -13,6 +13,17 @@ contextBridge.exposeInMainWorld('qingying', {
   startDownload: (options) => ipcRenderer.invoke('media:download', options),
   cancelDownload: () => ipcRenderer.invoke('media:cancel'),
   openFolder: (folder) => ipcRenderer.invoke('folder:open', { folder }),
+  windowControls: {
+    minimize: () => ipcRenderer.invoke('window:minimize'),
+    toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
+    close: () => ipcRenderer.invoke('window:close'),
+    isMaximized: () => ipcRenderer.invoke('window:is-maximized'),
+    onMaximizedChange: (callback) => {
+      const handler = (_event, payload) => callback(payload);
+      ipcRenderer.on('window:maximized', handler);
+      return () => ipcRenderer.removeListener('window:maximized', handler);
+    },
+  },
   onProgress: (callback) => {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('media:progress', handler);

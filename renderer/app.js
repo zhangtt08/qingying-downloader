@@ -547,6 +547,24 @@ window.qingying.getAppInfo()
   })
   .catch(() => {});
 
+// ── 自绘窗口控制 ──
+const winControls = window.qingying?.windowControls;
+if (winControls) {
+  const maxBtn = document.getElementById('win-maximize');
+  const setMax = (v) => maxBtn?.setAttribute('aria-expanded', String(v));
+  document.getElementById('win-minimize')?.addEventListener('click', () => void winControls.minimize());
+  maxBtn?.addEventListener('click', () => void winControls.toggleMaximize());
+  document.getElementById('win-close')?.addEventListener('click', () => void winControls.close());
+  winControls.isMaximized().then(setMax).catch(() => {});
+  winControls.onMaximizedChange?.(setMax);
+  for (const region of document.querySelectorAll('.brand, .workspace-header')) {
+    region.addEventListener('dblclick', (event) => {
+      if (event.target instanceof Element && event.target.closest('button, a, input, select')) return;
+      void winControls.toggleMaximize();
+    });
+  }
+}
+
 window.addEventListener('beforeunload', () => {
   removeProgressListener();
   removeDouyinLoginListener();
