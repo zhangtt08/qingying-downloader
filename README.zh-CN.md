@@ -57,3 +57,17 @@ npx asar pack QingYingDownloader_src C:\software\QingYingDownloader\resources\ap
 ## 许可证
 
 [MIT](LICENSE)
+
+## 🤖 Agent API
+
+应用运行期间，本地 HTTP 接口监听 `127.0.0.1:8392`。接口复用应用内的 yt-dlp / gallery-dl 引擎**与各站点登录会话**（抖音/TikTok/B站/小红书/Instagram 的 Cookie 注入），已登录站点的下载行为与界面一致。
+
+| 路由 | 方法 | 请求体 | 返回 |
+|---|---|---|---|
+| `/health` | GET | — | 版本与引擎信息 |
+| `/api/analyze` | POST | `{url}` | 标题/作者/`videos[]` + `audios[]` 格式列表，或 gallery-dl 图片清单 |
+| `/api/download` | POST | `{url, outputDir, mode: "combined"\|"video"\|"audio"\|"images", videoId?, audioId?, audioFormat?, images?}` | `{files: [落盘路径]}` |
+
+端口覆盖：`QINGYING_API_PORT`。同一时刻仅一个下载任务（与界面一致），重复请求返回 409。
+
+## 许可证

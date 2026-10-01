@@ -1,8 +1,10 @@
 const { app, BrowserWindow, clipboard, dialog, ipcMain, net, session, shell } = require('electron');
 const https = require('node:https');
+const http = require('node:http');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { createAgentApiServer, DEFAULT_API_PORT } = require('./agent-api.cjs');
 
 let mainWindow;
 let activeDownload = null;
@@ -683,7 +685,7 @@ ipcMain.handle('xiaohongshu:login', () => {
   return true;
 });
 
-ipcMain.handle('media:analyze', async (_event, payload) => {
+async function analyzeMedia(payload) {
   const inputUrl = safeText(payload?.url, 4096).trim();
   const url = isHttpUrl(inputUrl) ? normalizeMediaUrl(inputUrl) : inputUrl;
   if (!isHttpUrl(url)) {
@@ -748,9 +750,11 @@ ipcMain.handle('media:analyze', async (_event, payload) => {
   } finally {
     deleteCookieFile(cookieFile);
   }
-});
+}
 
-ipcMain.handle('media:download', async (_event, payload) => {
+ipcMain.handle('media:analyze', (_event, payload) => analyzeMedia(payload));
+
+async function downloadMedia(payload) {
   if (activeDownload) {
     return { ok: false, error: '已有下载任务正在进行。' };
   }
@@ -977,7 +981,9 @@ ipcMain.handle('media:download', async (_event, payload) => {
       }
     });
   });
-});
+}
+
+ipcMain.handle('media:download', (_event, payload) => downloadMedia(payload));
 
 ipcMain.handle('media:cancel', () => {
   if (!activeDownload) return false;
@@ -1001,6 +1007,19 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(() => {
     app.setAppUserModelId('com.qingying.downloader');
     createWindow();
+    // Agent API：复用应用内解析/下载流程与各站点登录会话；端口被占用时静默跳过。
+    try {
+      const apiPort = Number(process.env.QINGYING_API_PORT) || DEFAULT_API_PORT;
+      const server = createAgentApiServer({
+        analyzeMedia,
+        downloadMedia,
+        version: app.getVersion(),
+      });
+      server.on('error', () => {});
+      server.listen(apiPort, '127.0.0.1', () => {
+        console.log(`[qingying-agent-api] listening on http://127.0.0.1:${apiPort}`);
+      });
+    } catch (_) {}
   });
 }
 

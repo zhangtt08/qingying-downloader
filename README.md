@@ -75,3 +75,17 @@ npx asar pack QingYingDownloader_src C:\software\QingYingDownloader\resources\ap
 ## 📄 License
 
 [MIT](LICENSE)
+
+## 🤖 Agent API
+
+While the app is running, a local HTTP API is available on `127.0.0.1:8392`. It reuses the app's yt-dlp / gallery-dl engines **and its per-site login sessions** (Douyin / TikTok / Bilibili / Xiaohongshu / Instagram cookies), so logged-in downloads work the same as in the UI.
+
+| Endpoint | Method | Body | Result |
+|---|---|---|---|
+| `/health` | GET | — | version + engines |
+| `/api/analyze` | POST | `{url}` | title / uploader / `videos[]` + `audios[]` formats, or a gallery-dl image list |
+| `/api/download` | POST | `{url, outputDir, mode: "combined"\|"video"\|"audio"\|"images", videoId?, audioId?, audioFormat?, images?}` | `{files: [saved paths]}` |
+
+Port override: `QINGYING_API_PORT`. Only one download runs at a time (same as the UI); a second request returns 409.
+
+## 📄 License
