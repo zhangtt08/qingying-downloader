@@ -19,15 +19,79 @@ function endpointFile() {
   return existsSync(p) ? readFileSync(p, 'utf8').trim() : null;
 }
 
+// 本机令牌：非 GET 请求必须带（守卫判据在 electron/local-guard.cjs）。
+// 取值顺序 = 环境变量 QINGYING_API_TOKEN → 服务在 /api/health 里指出的令牌文件。
+// 走健康接口问"令牌文件在哪"而不是自己再拼一遍 app-data 路径，是为了不出现第二份判据
+// （两份路径迟早分叉，分叉的结果是 MCP 一路 401 而没人知道为什么）。
+let tokenPromise = null;
+let TOKEN = '';
+
+function readTokenFile(file) {
+  try {
+    const value = readFileSync(file, 'utf8').trim();
+    return /^[0-9a-f]{16,128}$/i.test(value) ? value : '';
+  } catch {
+    return '';
+  }
+}
+
+async function fetchToken(base) {
+  const fromEnv = String(process.env.QINGYING_API_TOKEN || '').trim();
+  if (fromEnv) return fromEnv;
+  try {
+    const res = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(3000) });
+    const body = await res.json().catch(() => ({}));
+    const guardInfo = body?.data?.guard || {};
+    const file = String(guardInfo.token_file || '').trim();
+    const value = file ? readTokenFile(file) : '';
+    if (value) return value;
+    log(`令牌文件读不到（${file || '健康接口没给路径'}），写请求会 401；也可以设环境变量 QINGYING_API_TOKEN`);
+  } catch (e) {
+    log(`取令牌失败：${e.message}`);
+  }
+  return '';
+}
+
+function tokenFor(base) {
+  if (!tokenPromise) {
+    tokenPromise = fetchToken(base).then((value) => {
+      TOKEN = value;
+      return value;
+    });
+  }
+  return tokenPromise;
+}
+
 async function rpc(base, method, params) {
-  const res = await fetch(`${base}/api/agent/${method === 'tools/list' ? 'tools' : 'tool'}`, {
+  const token = await tokenFor(base);
+  const headers = { 'content-type': 'application/json' };
+  if (token) headers['x-qingying-token'] = token;
+  let res = await fetch(`${base}/api/agent/${method === 'tools/list' ? 'tools' : 'tool'}`, {
     method: method === 'tools/list' ? 'GET' : 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers,
     body: method === 'tools/list' ? undefined : JSON.stringify(params),
     signal: AbortSignal.timeout(120_000),
   });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok || body.ok === false) throw new Error(body?.error?.message || `HTTP ${res.status}`);
+  let body = await res.json().catch(() => ({}));
+  // 服务刚换过令牌（app-data 里的文件被重建）就重取一次再试，只试一次。
+  if (res.status === 401 && method !== 'tools/list') {
+    tokenPromise = null;
+    const fresh = await tokenFor(base);
+    if (fresh && fresh !== token) {
+      headers['x-qingying-token'] = fresh;
+      res = await fetch(`${base}/api/agent/tool`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(params),
+        signal: AbortSignal.timeout(120_000),
+      });
+      body = await res.json().catch(() => ({}));
+    }
+  }
+  if (!res.ok || body.ok === false) {
+    const detail = body?.error?.message || `HTTP ${res.status}`;
+    throw new Error(res.status === 401 ? `${detail}（MCP 桥没带上本机令牌）` : detail);
+  }
   return body;
 }
 

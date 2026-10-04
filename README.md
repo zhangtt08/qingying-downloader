@@ -78,14 +78,30 @@ npx asar pack QingYingDownloader_src C:\software\QingYingDownloader\resources\ap
 
 ## 🤖 Agent API
 
-While the app is running, a local HTTP API is available on `127.0.0.1:8392`. It reuses the app's yt-dlp / gallery-dl engines **and its per-site login sessions** (Douyin / TikTok / Bilibili / Xiaohongshu / Instagram cookies), so logged-in downloads work the same as in the UI.
+While the app is running, a local HTTP API is available on `127.0.0.1:8392`. It reuses the app's yt-dlp / gallery-dl engines **and its per-site login sessions** (Douyin / TikTok / Bilibili / Xiaohongshu / Instagram cookies), so logged-in downloads work the same as in the UI. A second, headless agent surface (`npm run agent:serve`, port `8793`) exposes the same engine core as schema'd tools plus an MCP stdio bridge.
 
 | Endpoint | Method | Body | Result |
 |---|---|---|---|
-| `/health` | GET | — | version + engines |
-| `/api/analyze` | POST | `{url}` | title / uploader / `videos[]` + `audios[]` formats, or a gallery-dl image list |
-| `/api/download` | POST | `{url, outputDir, mode: "combined"\|"video"\|"audio"\|"images", videoId?, audioId?, audioFormat?, images?}` | `{files: [saved paths]}` |
+| `/health` | GET | — | version + engines + what the guard itself enforces |
+| `/api/status` | GET | — | the API's real bind state (listening / port / error) |
+| `/api/queue` | GET | — | current queue snapshot |
+| `/api/analyze` | POST | `{url}` + token header | title / uploader / `videos[]` + `audios[]` formats, or a gallery-dl image list |
+| `/api/download` | POST | `{url, outputDir, mode: "combined"\|"video"\|"audio"\|"images", videoId?, audioId?, audioFormat?, images?}` + token header | `{files: [saved paths]}` |
 
-Port override: `QINGYING_API_PORT`. Only one download runs at a time (same as the UI); a second request returns 409.
+Port override: `QINGYING_API_PORT`.
+
+### What the local API refuses, and why it can
+
+The API downloads with the user's logged-in sessions, so "it only binds 127.0.0.1" is not a boundary — any local process, and any web page via a cross-origin POST, can reach a loopback port. Both surfaces therefore run the same guard (`electron/local-guard.cjs`):
+
+- **Loopback only** — binding to a non-loopback host is refused outright, not warned about.
+- **Literal `Host` allowlist** — `127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`; anything else gets `403 HOST_NOT_ALLOWED`. The Origin check is never compared against the request's own Host, because that equality is exactly what DNS rebinding produces.
+- **Foreign `Origin`/`Referer` → `403` with a JSON body** — a browser tab cannot drive the downloader.
+- **Token on every non-GET** — `x-qingying-token: <token>` (or `Authorization: Bearer`). The token lives in per-user app-data at `%APPDATA%\qingying-downloader\qingying\agent-api.token`, created with mode `0600` on first use, so the MCP bridge and CLI callers keep working without anyone exporting an environment variable. `QINGYING_API_TOKEN` overrides the file. If the token cannot be read or created, writes fail closed with `503 TOKEN_UNAVAILABLE` — the absence of a secret never opens the door.
+- **`outputDir` is contained** — it must resolve (after `realpath`) inside a download root the user designated, i.e. the folder in the app's 保存位置 setting (`settings.outputDir`, plus optional `allowedOutputRoots` / `QINGYING_DOWNLOAD_ROOTS`). Anything else — an unrelated absolute path, `..\` traversal, a junction inside the root pointing outside it — is refused with `403 output_dir_outside_root`, and the message names the allowed roots and how to change them. No directory is created before the check passes.
+- **No wildcard CORS** on mutating routes; nothing is echoed back except status, sizes and paths.
+
+Cookie values never leave the process: `/health`, `/api/status`, the agent tools and the UI report login state, cookie *names* and expiry only.
+
 
 ## 📄 License

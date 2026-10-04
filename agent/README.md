@@ -11,11 +11,35 @@ npm run agent:mcp       # MCP stdio 桥；服务未起时按 agent/launch.json �
 ```
 
 ```
-GET  /api/health          健康与版本
+GET  /api/health          健康与版本 + 守卫自己正在执行哪几条 + 桌面接口的真实状态
 GET  /api/agent/tools     工具清单（name / description / input_schema / risk）
 GET  /api/agent/manifest  项目元信息 + 工具清单
-POST /api/agent/tool      唯一调用入口，body = {tool, input}
+POST /api/agent/tool      唯一调用入口，body = {tool, input}，必须带 x-qingying-token
 ```
+
+## 安全边界
+
+判据只有一份：`electron/local-guard.cjs`，应用内接口（8392）与本服务（8793）共用。
+
+- **只绑 `127.0.0.1`**；指定别的地址直接拒绝启动，不是警告。
+- **`Host` 逐字白名单** `127.0.0.1:<端口> / localhost:<端口> / [::1]:<端口>`，否则 `403 HOST_NOT_ALLOWED`。
+  Origin 判据**从不**与请求自己的 Host 相比 —— 那个等式正是 DNS rebinding 的结果。
+- **外部 Origin/Referer → 403 + JSON 错误体**：网页不能驱动这个下载器（它带着用户的登录会话）。
+- **非 GET 一律要本机令牌**（`x-qingying-token` 或 `Authorization: Bearer`）。令牌在
+  `%APPDATA%\qingying-downloader\qingying\agent-api.token`，首次使用时按 `0600` 创建；
+  MCP 桥先 `GET /api/health` 拿到这个路径再自己读，所以不带环境变量也能干活。
+  `QINGYING_API_TOKEN` 优先于文件。令牌不可用时写请求 `503 TOKEN_UNAVAILABLE`（fail-closed）。
+- **`qingying.download` 的 `output_dir` 被收住**：必须 realpath 之后落在用户指定的下载根目录之内
+  （`settings.outputDir` + `allowed_output_roots`，或 `QINGYING_DOWNLOAD_ROOTS`）；越界返回
+  `400 output_dir_outside_root` 并列出允许的根目录，判定通过前不创建任何目录。
+  没有指定过下载根目录 = 一个字节都不写。
+- **状态变更路由没有通配 CORS**（`OPTIONS` 回 `403 NO_CORS`）。
+- **登录态只报状态，永不返回 Cookie 或凭据值。**
+- 唯一写盘的 `qingying.download` 标 `risk: exec`，缺 `confirm: true` 时直接拒绝。
+
+自检：`npm run agent:check`（真起服务、真打守卫四条与目录边界）与
+`npm run verify`（`scripts/api-guard.test.cjs`：伪造 Host、外部 Origin、缺令牌、
+越界 outputDir、以及"合法路径仍能走通"两侧都判）。
 
 ## 工具（8 个）
 
@@ -32,9 +56,3 @@ POST /api/agent/tool      唯一调用入口，body = {tool, input}
 
 引擎调用、任务队列与登录会话都复用应用自己的模块（`electron/engine-core.cjs` 等），
 Agent 与桌面窗口看到的是同一套状态，不存在第二份实现。
-
-## 安全边界
-
-- 只绑 `127.0.0.1`。
-- **登录态只报状态，永不返回 Cookie 或凭据值。**
-- 唯一写盘的 `qingying.download` 标 `risk: exec`，缺 `confirm: true` 时只返回计划不下载。

@@ -37,6 +37,18 @@ function dataDir() {
   return path.join(base, 'qingying-downloader', 'qingying');
 }
 
+// server.mjs 要的守卫配置：令牌文件与桌面接口状态文件都落在当前用户 app-data 里（0600）。
+// 应用内接口（8392）与本服务（8793）读的是同一份令牌，MCP 桥也读同一份，不需要谁给谁发环境变量。
+export const agentConfig = {
+  tokenHeader: 'x-qingying-token',
+  get tokenFile() {
+    return core.dataPaths(dataDir()).apiToken;
+  },
+  get desktopApiStatusFile() {
+    return core.dataPaths(dataDir()).apiStatus;
+  },
+};
+
 function engineOptions(dir) {
   const settings = safeSettings(dir);
   const roots = [];
@@ -63,15 +75,18 @@ function requireUrl(input) {
   return core.normalizeMediaUrl(raw);
 }
 
+// 下载目录的边界：只能落在用户指定的下载根目录之内（设置「保存位置」+ allowedOutputRoots），
+// realpath 之后判定，所以"根目录里套一个指向别处的 junction"也算越界。
+// 没有指定过下载根目录 = 一个字节都不写（不再悄悄退回 ~/Downloads）。
 function resolveOutputDir(input, settings) {
+  const roots = core.downloadRoots(settings);
   const explicit = core.safeText(input.output_dir, 1024).trim();
-  const candidate = explicit || settings.outputDir || path.join(os.homedir(), 'Downloads');
-  const abs = path.resolve(candidate);
-  if (fs.existsSync(abs) && !fs.statSync(abs).isDirectory()) {
-    throw new AgentError('bad_input', `下载目录不是目录：${abs}`);
+  const candidate = explicit || settings.outputDir || '';
+  const check = core.resolveContainedOutputDir(candidate, roots, { create: true });
+  if (!check.ok) {
+    throw new AgentError(check.code || 'output_dir_refused', check.error);
   }
-  fs.mkdirSync(abs, { recursive: true });
-  return abs;
+  return check;
 }
 
 // 无头模式下的 Cookie 来源：只认用户在界面里显式导出的文件（不会被删除或改写）。
@@ -209,7 +224,8 @@ const tools = [
         audios_truncated: audios.truncated,
         images: images.items,
         images_truncated: images.truncated,
-        output_dir: settings.outputDir || path.join(os.homedir(), 'Downloads'),
+        output_dir: settings.outputDir || '（还没有指定下载目录：download 会被拒绝，请先在界面「保存位置」里选目录，或用 settings_set 设 output_dir）',
+        download_roots: core.downloadRoots(settings),
         filename_preview: core.previewFilename(settings.filenameTemplate, {
           title: data.title,
           id: '',
@@ -233,7 +249,7 @@ const tools = [
         audio_id: { type: 'string', description: 'yt-dlp format_id；留空自动挑。' },
         audio_format: { type: 'string', enum: ['mp3', 'm4a', 'opus', 'wav'] },
         engine: { type: 'string', enum: ['yt-dlp', 'gallery-dl'] },
-        output_dir: { type: 'string', description: '绝对或相对目录；留空用设置里的下载目录。' },
+        output_dir: { type: 'string', description: '绝对目录，必须在已指定的下载根目录之内（设置里的「保存位置」或 allowed_output_roots）；留空用下载根目录本身。越界直接拒绝，不写盘。' },
       },
       required: ['url'],
       additionalProperties: false,
@@ -246,7 +262,8 @@ const tools = [
       const settings = safeSettings(dir);
       const url = requireUrl(input);
       const engines = await core.probeEngines(engineOptions(dir));
-      const outputDir = resolveOutputDir(input, settings);
+      const target = resolveOutputDir(input, settings);
+      const outputDir = target.resolved;
       const site = core.matchLoginSite(url);
       const provideCookies = makeCookieProvider(dir, settings);
       const cookieFile = await provideCookies(site);
@@ -395,6 +412,7 @@ const tools = [
         engine: job.used_engine,
         mode,
         output_dir: outputDir,
+        download_root: target.root,
         bytes: job.bytes,
         size_text: core.formatBytes(job.bytes) || '0 B',
         files: job.files.map((f) => ({ path: f.path, bytes: f.bytes, size: core.formatBytes(f.bytes) || '' })),
@@ -518,9 +536,11 @@ const tools = [
       return {
         data_dir: dir,
         settings,
+        download_roots: core.downloadRoots(settings),
         filename_template_valid: core.validateFilenameTemplate(settings.filenameTemplate).ok,
         allowed_template_fields: core.TEMPLATE_FIELDS,
         downloads_dir_exists: fs.existsSync(settings.outputDir || ''),
+        note: '接口写入的目录只能是 download_roots 之内（realpath 判定）；download_roots 为空时任何下载都会被拒绝。',
       };
     },
   },
@@ -531,7 +551,8 @@ const tools = [
     input_schema: {
       type: 'object',
       properties: {
-        output_dir: { type: 'string' },
+        output_dir: { type: 'string', description: '下载根目录（绝对路径）。这是"用户指定下载根目录"的接口侧入口，只有带令牌的调用方能改。' },
+        allowed_output_roots: { type: 'array', description: '额外指定的下载根目录数组（绝对路径，最多 8 个）。' },
         filename_template: { type: 'string' },
         concurrency: { type: 'integer' },
         auto_retry: { type: 'integer' },
@@ -546,7 +567,14 @@ const tools = [
     handler: async (input) => {
       const dir = dataDir();
       const patch = {};
-      if (input.output_dir !== undefined) patch.outputDir = core.safeText(input.output_dir, 1024);
+      if (input.output_dir !== undefined) {
+        const want = core.safeText(input.output_dir, 1024).trim();
+        if (want && !path.isAbsolute(want)) {
+          throw new AgentError('bad_input', `output_dir 是下载根目录，必须是绝对路径：当前是「${want}」。`);
+        }
+        patch.outputDir = want;
+      }
+      if (input.allowed_output_roots !== undefined) patch.allowedOutputRoots = input.allowed_output_roots;
       if (input.filename_template !== undefined) patch.filenameTemplate = core.safeText(input.filename_template, 200);
       if (input.concurrency !== undefined) patch.concurrency = input.concurrency;
       if (input.auto_retry !== undefined) patch.autoRetry = input.auto_retry;

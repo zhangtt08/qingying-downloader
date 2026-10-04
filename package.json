@@ -8,6 +8,7 @@
   "scripts": {
     "start": "electron .",
     "check": "node scripts/check.cjs",
+    "verify": "node scripts/verify.cjs",
     "agent:serve": "node agent/server.mjs",
     "agent:mcp": "node agent/mcp-server.mjs",
     "agent:check": "node scripts/agent-smoke.cjs"

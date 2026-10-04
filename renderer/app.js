@@ -65,6 +65,7 @@ const elements = {
   settingSubfolder: document.querySelector('#setting-subfolder'),
   settingExportCookies: document.querySelector('#setting-export-cookies'),
   dataDirNote: document.querySelector('#data-dir-note'),
+  apiStatusNote: document.querySelector('#api-status-note'),
 
   authList: document.querySelector('#auth-list'),
   authStorageNote: document.querySelector('#auth-storage-note'),
@@ -1046,6 +1047,28 @@ function formatTime(iso) {
   return date.toLocaleDateString('zh-CN');
 }
 
+// ── 本机接口状态 ────────────────────────────────────────────────────────────
+// 端口被占时主进程不再安静地什么都不说：这里显示的是接口自己报的真实状态，
+// 不是文档里那句"接口监听在 8392"。令牌只显示"必需"，值永远不进界面。
+function renderApiStatus(state) {
+  if (!state) return;
+  const roots = Array.isArray(state.download_roots) && state.download_roots.length
+    ? state.download_roots.join('、')
+    : '（还没有指定下载目录，接口不会写任何文件）';
+  if (!state.listening) {
+    if (elements.apiStatusNote) {
+      elements.apiStatusNote.textContent = `本机接口：没有起来。${state.error || '主进程没有给出原因'}`
+        + ' 换端口：设环境变量 QINGYING_API_PORT 后重启软件。接口不可用不影响界面里的下载。';
+    }
+    setStatus(`本机接口没有起来：${state.error || '端口可能被别的程序占用'}`, 'error');
+    return;
+  }
+  if (elements.apiStatusNote) {
+    elements.apiStatusNote.textContent = `本机接口：${state.url} 正在监听（只绑 127.0.0.1，Host 只认本机回环，网页跨源调用一律 403）。`
+      + `非 GET 请求必须带本机令牌（请求头 ${state.token_header}）；接口能写入的目录仅限已指定的下载根目录之内：${roots}。`;
+  }
+}
+
 // ── 设置 ──────────────────────────────────────────────────────────────────
 function applySettings(next) {
   if (!next) return;
@@ -1349,6 +1372,7 @@ window.qingying.onQueueChanged((snapshot) => {
     engines = snapshot.engines;
     renderEngines();
   }
+  if (snapshot?.api) renderApiStatus(snapshot.api);
 });
 window.qingying.onAuthChanged((snapshot) => {
   auth = snapshot;
@@ -1360,6 +1384,7 @@ window.qingying.onEnginesChanged((record) => {
   engines = record;
   renderEngines();
 });
+window.qingying.onApiStatus((record) => renderApiStatus(record));
 
 // ── 启动 ──────────────────────────────────────────────────────────────────
 setMode('combined');
@@ -1368,14 +1393,16 @@ renderAuth();
 
 async function bootstrap() {
   try {
-    const [info, settingsResult, queueResult, historyResult, enginesResult, sites] = await Promise.all([
+    const [info, settingsResult, queueResult, historyResult, enginesResult, sites, apiRecord] = await Promise.all([
       window.qingying.getAppInfo(),
       window.qingying.settingsGet(),
       window.qingying.listQueue(),
       window.qingying.historyList(),
       window.qingying.enginesProbe(),
       window.qingying.sitesList(),
+      window.qingying.apiStatus(),
     ]);
+    renderApiStatus(apiRecord);
     applySiteCatalog(sites);
     if (info?.version) elements.appVersion.textContent = `v${info.version}`;
     if (info?.default_template) defaultTemplate = info.default_template;

@@ -80,6 +80,43 @@ report('agent launch.json port 8793', launch.command === 'node' && launch.ready_
 const serverSrc = fs.readFileSync(path.join(ROOT, 'agent', 'server.mjs'), 'utf8');
 report('agent server default port 8793', /PROJECT_DEFAULT_PORT = 8793/.test(serverSrc));
 
+// 6b) 本机接口守卫：两条接口必须走同一份判据，且不许留通配 CORS / 任意输出目录。
+//     （行为判据在 scripts/api-guard.test.cjs，这里守的是"接线有没有被改回去"。）
+const localGuardSrc = fs.readFileSync(path.join(ROOT, 'electron', 'local-guard.cjs'), 'utf8');
+const agentApiSrc = fs.readFileSync(path.join(ROOT, 'electron', 'agent-api.cjs'), 'utf8');
+report('guard module exists and is required by both api surfaces',
+  /require\('\.\/local-guard\.cjs'\)/.test(agentApiSrc) && /'..', 'electron', 'local-guard\.cjs'/.test(serverSrc),
+  '');
+report('guard checks Host before any business route',
+  /checkLocalGuard\(req/.test(agentApiSrc) && /replyGuardDenied/.test(agentApiSrc)
+  && /checkLocalGuard\(req/.test(serverSrc), '');
+report('Origin is never compared against the request own Host (DNS rebinding)',
+  !/headers\.host[\s\S]{0,40}(===|==)\s*origin|origin[\s\S]{0,40}(===|==)\s*req\.headers\.host/i.test(localGuardSrc));
+// 只在"非注释行"上判跨域头：把判据写在注释里说明边界是允许的，把 ACAO 发出去才是要挡的。
+function acaoCodeLines(src) {
+  return src.split(/\r?\n/).filter((line) => /access-control-allow/i.test(line))
+    .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line));
+}
+report('no wildcard CORS emitted on any local api surface',
+  acaoCodeLines(agentApiSrc).length === 0 && acaoCodeLines(serverSrc).length === 0
+  && /guard\.localHeaders/.test(agentApiSrc),
+  acaoCodeLines(agentApiSrc).concat(acaoCodeLines(serverSrc)).join(' | ').slice(0, 120));
+report('non-GET requires a token on both surfaces',
+  /\{\s*port,\s*token[,}]/.test(agentApiSrc) && /token:\s*tokenInfo\.token/.test(serverSrc));
+report('token file lives in per-user app-data (0600)',
+  /apiToken/.test(fs.readFileSync(path.join(ROOT, 'electron', 'engine-core.cjs'), 'utf8'))
+  && /mode:\s*0o600/.test(localGuardSrc) && /chmodSync\(file, 0o600\)/.test(localGuardSrc));
+report('in-app api refuses outputDir outside the download root',
+  /resolveOutputDir/.test(agentApiSrc) && /output_dir_refused|output_dir_outside_root|!target\.ok/.test(agentApiSrc));
+report('main wires the containment helper',
+  /resolveContainedOutputDir/.test(main) && /downloadRoots/.test(main));
+report('agent tool output_dir goes through the same containment',
+  /resolveContainedOutputDir/.test(agentTools));
+report('mcp bridge sends the local token header',
+  /x-qingying-token/.test(fs.readFileSync(path.join(ROOT, 'agent', 'mcp-server.mjs'), 'utf8')));
+report('both api surfaces bind loopback only via listenLocal',
+  /listenLocal/.test(localGuardSrc) && /listenLocal\(server/.test(fs.readFileSync(path.join(ROOT, 'electron', 'agent-api.cjs'), 'utf8')));
+
 // 7) 引擎核心行为（无网络）
 const core = require(path.join(ROOT, 'electron', 'engine-core.cjs'));
 
@@ -255,7 +292,7 @@ function undefinedConstants(file) {
   }
   return [...new Set(used)].filter((name) => !declared.has(name) && !AMBIENT_GLOBALS.has(name));
 }
-for (const file of ['electron/engine-core.cjs', 'electron/main.cjs', 'electron/agent-api.cjs', 'agent/tools.mjs', 'agent/server.mjs', 'renderer/app.js']) {
+for (const file of ['electron/engine-core.cjs', 'electron/main.cjs', 'electron/agent-api.cjs', 'electron/local-guard.cjs', 'agent/tools.mjs', 'agent/server.mjs', 'renderer/app.js']) {
   const undeclared = undefinedConstants(path.join(ROOT, file));
   report('no undeclared CONSTANT in ' + file, undeclared.length === 0, undeclared.join(','));
 }

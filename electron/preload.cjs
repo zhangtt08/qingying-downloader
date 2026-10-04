@@ -44,6 +44,10 @@ contextBridge.exposeInMainWorld('qingying', {
   settingsSet: (patch) => invoke('settings:set', patch),
   previewTemplate: (template, sample) => invoke('template:preview', { template, sample }),
 
+  // 本机接口的真实状态（监听成功与否、端口、令牌是否必需）——界面据此显示，不再只信文档。
+  apiStatus: () => invoke('api:status'),
+  onApiStatus: (callback) => listener('api:status', callback),
+
   historyList: () => invoke('history:list'),
   historyClear: () => invoke('history:clear'),
 

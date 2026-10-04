@@ -2,7 +2,8 @@ const { app, BrowserWindow, clipboard, dialog, ipcMain, net, session, shell } = 
 const fs = require('node:fs');
 const path = require('node:path');
 const core = require('./engine-core.cjs');
-const { createAgentApiServer, DEFAULT_API_PORT } = require('./agent-api.cjs');
+const guard = require('./local-guard.cjs');
+const { startAgentApi, DEFAULT_API_PORT } = require('./agent-api.cjs');
 
 const LOGIN_SITES = core.LOGIN_SITES;
 const SITE_IDS = core.SITE_IDS;
@@ -14,6 +15,46 @@ const loginWindows = {};
 // ── 本机数据目录（全部在 userData，仓库里没有）─────────────────────────────
 const DATA_DIR = () => path.join(app.getPath('userData'), 'qingying');
 const TEMP_DIR = () => app.getPath('temp');
+
+// ── 应用内接口的真实状态（监听成功与否、端口、令牌）─────────────────────────
+// 界面与 /api/status 读的都是这一份：以前端口被占只是 console 里没有的一句话，
+// 文档却写着"接口在 8392"，谁都不知道它其实没起来。
+let apiState = {
+  listening: false,
+  host: '127.0.0.1',
+  port: DEFAULT_API_PORT,
+  url: '',
+  error: '',
+  token_required: true,
+  token_header: guard.TOKEN_HEADER,
+  token_source: '',
+  token_file: '',
+  started_at: '',
+  cookie_values_never_returned: true,
+};
+
+function publicApiState() {
+  return {
+    ...apiState,
+    // 令牌值本身永远不出去，只报它存在与否、来自哪里。
+    token_file: apiState.token_file || core.dataPaths(DATA_DIR()).apiToken,
+    download_roots: core.downloadRoots(core.readSettings(DATA_DIR())),
+    data_dir: DATA_DIR(),
+  };
+}
+
+function reportApiState(patch) {
+  apiState = { ...apiState, ...patch };
+  const snapshot = publicApiState();
+  sendToMain('api:status', snapshot);
+  try {
+    // 独立 Agent 进程（8793）与命令行工具读这份文件，把"应用内接口到底起没起来"如实转出去。
+    core.writeJsonFile(core.dataPaths(DATA_DIR()).apiStatus, { ...snapshot, written_at: new Date().toISOString() });
+  } catch (error) {
+    console.error('[qingying-agent-api] 状态落盘失败：' + (error && error.message ? error.message : String(error)));
+  }
+  return apiState;
+}
 
 function sendToMain(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -283,6 +324,7 @@ function queueSnapshot() {
     limit: core.readSettings(DATA_DIR()).concurrency,
     settings: publicSettings(),
     engines: enginesCache,
+    api: publicApiState(),
   };
 }
 
@@ -764,6 +806,9 @@ ipcMain.handle('queue:clear-finished', () => {
 
 ipcMain.handle('queue:list', () => queueSnapshot());
 
+// 接口的真实状态：界面用它显示"本机接口在不在"，端口被占时不再是一片安静。
+ipcMain.handle('api:status', () => publicApiState());
+
 // ── 登录窗口与登录态开关 ──────────────────────────────────────────────────
 function openLogin(site) {
   const existing = loginWindows[site.id];
@@ -861,6 +906,16 @@ ipcMain.handle('auth:export', async (_event, payload) => {
 // ── 供应用内 HTTP 接口（127.0.0.1:8392）复用：提交队列并等它跑完 ────────────
 const FINISHED_STATUSES = new Set(['done', 'failed', 'cancelled', 'paused']);
 
+// 接口传来的 outputDir 只能落在用户指定的下载根目录之内（设置「保存位置」+ allowedOutputRoots）。
+// 判据只有一份：engine-core 的 resolveContainedOutputDir；界面自己选目录不受影响，
+// 因为人在界面里选目录这个动作本身就是"指定下载根目录"。
+function resolveDownloadOutputDir(candidate) {
+  const settings = core.readSettings(DATA_DIR());
+  const roots = core.downloadRoots(settings);
+  const result = core.resolveContainedOutputDir(candidate, roots);
+  return { ...result, roots };
+}
+
 function downloadThroughQueue(payload) {
   const task = makeTask(payload || {});
   pumpQueue();
@@ -920,19 +975,37 @@ if (!hasSingleInstanceLock) {
       core.writeSettings(DATA_DIR(), { outputDir: app.getPath('downloads') });
       emitQueue(true);
     }
-    try {
-      const apiPort = Number(process.env.QINGYING_API_PORT) || DEFAULT_API_PORT;
-      const server = createAgentApiServer({
-        analyzeMedia,
-        downloadMedia: downloadThroughQueue,
-        queueSnapshot,
-        version: app.getVersion(),
-      });
-      server.on('error', () => {});
-      server.listen(apiPort, '127.0.0.1', () => {
-        console.log('[qingying-agent-api] listening on http://127.0.0.1:' + apiPort);
-      });
-    } catch (_) {}
+    // 应用内接口的启动结果必须如实交出去：端口被占时以前是 on('error',()=>{}) + 空 catch，
+    // 表现是"文档说接口在 8392，实际什么都没有"，界面与接口都不报错。
+    const apiPort = Number(process.env.QINGYING_API_PORT) || DEFAULT_API_PORT;
+    const tokenInfo = guard.resolveApiToken({ tokenFile: core.dataPaths(DATA_DIR()).apiToken });
+    reportApiState({
+      port: apiPort,
+      token_required: true,
+      token_source: tokenInfo.source,
+      token_file: tokenInfo.file || core.dataPaths(DATA_DIR()).apiToken,
+      started_at: new Date().toISOString(),
+      error: tokenInfo.error || '',
+    });
+    const outcome = await startAgentApi({
+      port: apiPort,
+      host: '127.0.0.1',
+      token: tokenInfo.token,
+      tokenFile: tokenInfo.file || core.dataPaths(DATA_DIR()).apiToken,
+      version: app.getVersion(),
+      analyzeMedia,
+      downloadMedia: downloadThroughQueue,
+      queueSnapshot,
+      resolveOutputDir: resolveDownloadOutputDir,
+      statusSnapshot: publicApiState,
+    });
+    if (outcome.ok) {
+      reportApiState({ listening: true, host: outcome.host, port: outcome.port, url: outcome.url, error: '' });
+      console.log('[qingying-agent-api] listening on ' + outcome.url + '（非 GET 需本机令牌）');
+    } else {
+      reportApiState({ listening: false, host: outcome.host, port: apiPort, url: '', error: outcome.error });
+      console.error('[qingying-agent-api] ' + outcome.error);
+    }
   });
 }
 

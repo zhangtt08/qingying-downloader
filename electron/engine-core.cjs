@@ -1635,6 +1635,9 @@ function dataPaths(root) {
     history: path.join(root, 'history.json'),
     authState: path.join(root, 'auth-state.json'),
     cookieDir: path.join(root, 'cookies'),
+    // 本机接口的共享令牌（0600，当前用户 app-data 内）与接口真实状态。
+    apiToken: path.join(root, 'agent-api.token'),
+    apiStatus: path.join(root, 'agent-api-status.json'),
   };
 }
 
@@ -1649,6 +1652,9 @@ const DEFAULT_SETTINGS = {
   exportCookiesForCli: false,
   // 引擎所在目录（打包版的 resources/bin）。留空则按 env -> 项目内 resources -> PATH 找。
   enginesDir: '',
+  // 除「保存位置」以外额外指定的下载根目录（最多 8 个，必须是绝对路径）。
+  // 接口写入的 outputDir 只能落在 outputDir 与这里的根目录之内（见 resolveContainedOutputDir）。
+  allowedOutputRoots: [],
 };
 
 function readJsonFile(file, fallback) {
@@ -1692,6 +1698,7 @@ function readSettingsFromValue(value) {
   const merged = { ...DEFAULT_SETTINGS, ...value };
   if (typeof merged.enginesDir !== 'string') merged.enginesDir = '';
   merged.enginesDir = safeText(merged.enginesDir, 1024).trim();
+  merged.allowedOutputRoots = normalizeOutputRoots(merged.allowedOutputRoots);
   merged.concurrency = clampInt(merged.concurrency, 1, 4, 2);
   merged.autoRetry = clampInt(merged.autoRetry, 0, 5, 2);
   if (!['auto', 'yt-dlp', 'gallery-dl'].includes(merged.enginePreference)) merged.enginePreference = 'auto';
@@ -1703,8 +1710,182 @@ function readSettingsFromValue(value) {
   if (!template.ok) {
     merged.filenameTemplate = DEFAULT_FILENAME_TEMPLATE;
   }
+  if (typeof merged.outputDir !== 'string') merged.outputDir = '';
+  merged.outputDir = safeText(merged.outputDir, 1024).trim();
   merged.output_dir_is_absolute = Boolean(merged.outputDir) && path.isAbsolute(merged.outputDir);
   return merged;
+}
+
+// ── 下载根目录包含判定（接口写入路径的边界）───────────────────────────────
+// 用户在本机指定的"下载根目录"只有两处来源：设置里的「保存位置」+ 显式追加的
+// allowedOutputRoots（以及命令行临时指定的 QINGYING_DOWNLOAD_ROOTS）。
+// 接口传来的 outputDir 必须 realpath 之后落在其中一个根之内，否则拒绝 ——
+// 这一条挡住的是"拿着令牌就能把文件写到任意位置"这件事（纵深防御）：
+// 令牌挡的是没有令牌的调用方与跨源浏览器 POST，根目录约束挡的是合法调用方越界写盘。
+const DOWNLOAD_ROOTS_ENV = 'QINGYING_DOWNLOAD_ROOTS';
+const DOWNLOAD_ROOTS_LIMIT = 8;
+
+function normalizeOutputRoots(value) {
+  const list = Array.isArray(value) ? value : [];
+  const out = [];
+  for (const item of list) {
+    const text = safeText(item, 1024).trim();
+    if (!text || !path.isAbsolute(text)) continue;
+    const resolved = path.resolve(text);
+    if (!out.includes(resolved)) out.push(resolved);
+    if (out.length >= DOWNLOAD_ROOTS_LIMIT) break;
+  }
+  return out;
+}
+
+/** 当前这台机器上被指定为"下载根"的目录（绝对、去重、按顺序）。 */
+function downloadRoots(settings, env) {
+  const source = env || process.env;
+  const list = [];
+  const push = (value) => {
+    const text = safeText(value, 1024).trim();
+    if (!text || !path.isAbsolute(text)) return;
+    const resolved = path.resolve(text);
+    if (!list.includes(resolved)) list.push(resolved);
+  };
+  push(settings && settings.outputDir);
+  for (const root of normalizeOutputRoots(settings && settings.allowedOutputRoots)) push(root);
+  for (const root of String(source[DOWNLOAD_ROOTS_ENV] || '').split(path.delimiter)) push(root);
+  return list;
+}
+
+/** 纯路径判定：target 是否等于 root 或在 root 之内（按分隔符比，不做字符串 startsWith 猜）。 */
+function pathIsInside(root, target) {
+  const rel = path.relative(root, target);
+  return rel === '' || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
+}
+
+function realpathOrEmpty(target, impl) {
+  const real = impl || fs.realpathSync;
+  try {
+    return real(target);
+  } catch {
+    return '';
+  }
+}
+
+/** 最近的已存在祖先（目录还没建时用它判定；尾段是新建名字，不可能是链接点）。 */
+function nearestExistingAncestor(target) {
+  let current = path.resolve(target);
+  for (let depth = 0; depth < 64; depth += 1) {
+    const parent = path.dirname(current);
+    if (parent === current) return current;
+    if (fs.existsSync(current)) return current;
+    current = parent;
+  }
+  return current;
+}
+
+/**
+ * 把一个路径投影到它的"真实位置"：存在就 realpath；还不存在就按最近的已存在祖先
+ * realpath 之后把没落地的尾段拼回去。根目录和目标都必须走这一份投影 ——
+ * Windows 的 %TEMP% 常常是 8.3 短名（ADMINI~1），一边投影一边不投影会判成假越界。
+ */
+function projectRealPath(target, impl) {
+  const direct = realpathOrEmpty(target, impl);
+  if (direct) return direct;
+  const ancestor = nearestExistingAncestor(target);
+  const ancestorReal = realpathOrEmpty(ancestor, impl);
+  if (!ancestorReal) return '';
+  return path.join(ancestorReal, path.relative(ancestor, target));
+}
+
+/**
+ * 接口/命令行要写进去的目录：必须 realpath 之后落在某个下载根之内。
+ * 返回 { ok, resolved, real, root } 或 { ok:false, code, error }；拒绝时 error 说清"怎么改才能过"。
+ * 默认不创建目录（options.create = true 时才建，建完再复查一次 realpath）。
+ */
+function resolveContainedOutputDir(candidate, roots, options) {
+  const opts = options || {};
+  const impl = opts.realpathSync;
+  const want = safeText(candidate, 1024).trim();
+  const rootList = Array.isArray(roots) ? roots.filter((r) => safeText(r, 1024).trim()) : [];
+  if (!want) {
+    return { ok: false, code: 'output_dir_missing', resolved: '', root: '', error: '没有给下载目录。请传 outputDir，且它必须是已指定的下载根目录之内的绝对路径。' };
+  }
+  if (!path.isAbsolute(want)) {
+    return { ok: false, code: 'output_dir_not_absolute', resolved: '', root: '', error: '下载目录必须是绝对路径：当前是 ' + want + '。请改成本机下载根目录下的绝对路径，例如 ' + (rootList[0] || 'C:\\Users\\你\\Downloads') + '\\子文件夹。' };
+  }
+  if (!rootList.length) {
+    return { ok: false, code: 'no_download_root', resolved: '', root: '', error: '这台机器还没有指定下载根目录：请在清影下载器界面「保存位置」里选一个文件夹（或给命令行接口设 QINGYING_DOWNLOAD_ROOTS），此后接口只能往那个目录之内写文件。' };
+  }
+  const target = path.resolve(want);
+  const realRoots = [];
+  for (const root of rootList) {
+    const resolvedRoot = path.resolve(root);
+    realRoots.push({ given: resolvedRoot, real: projectRealPath(resolvedRoot, impl) || resolvedRoot });
+  }
+  // 目标按真实位置判：软链接 / junction 指向根外就拒（"根目录里套一个链到 C:\\Windows 的链接"不是允许的写法）。
+  const projected = projectRealPath(target, impl);
+  if (!projected) {
+    return { ok: false, code: 'output_dir_unreachable', resolved: target, root: '', error: '下载目录连最近的上级目录都读不出来：' + target + '。请先在界面里指定一个真实存在的下载根目录。' };
+  }
+  const hit = realRoots.find((entry) => pathIsInside(entry.real, projected));
+  if (!hit) {
+    return {
+      ok: false,
+      code: 'output_dir_outside_root',
+      resolved: target,
+      real: projected,
+      root: '',
+      error: '下载目录不在已指定的下载根目录之内：' + target + '（真实位置 ' + projected + '）。本机只允许写进这些根目录：'
+        + realRoots.map((entry) => entry.given).join(' / ') + '。请把 outputDir 指到根目录之内，或先在界面「保存位置」里把下载根目录改成它所在的文件夹。',
+    };
+  }
+  if (opts.create) {
+    try {
+      fs.mkdirSync(target, { recursive: true });
+    } catch (error) {
+      return { ok: false, code: 'output_dir_create_failed', resolved: target, root: hit.given, error: '无法创建下载目录 ' + target + '：' + safeText(error && error.message, 200) };
+    }
+    // 建完再复查一次：目录可能是刚刚被别人换成了链接点。
+    const createdReal = realpathOrEmpty(target, impl);
+    if (createdReal && !pathIsInside(hit.real, createdReal)) {
+      return { ok: false, code: 'output_dir_outside_root', resolved: createdReal, root: hit.given, error: '新建的下载目录 realpath 后跑到了下载根目录之外（中间有软链接或 junction）：' + target + ' → ' + createdReal + '。请去掉链接层级后重试。' };
+    }
+    return { ok: true, resolved: target, real: createdReal || projected, root: hit.given };
+  }
+  return { ok: true, resolved: target, real: projected, root: hit.given };
+}
+
+// ── 临时分片清理的目录边界（同一个包含判据，别写第二遍）────────────────────
+/** 允许清理的目录 = 下载根目录们；空列表 = 什么都不许清（fail-closed）。 */
+function allowedCleanupRoots(settings, env) {
+  return downloadRoots(settings, env);
+}
+
+/**
+ * 某个候选目录能不能被"扫描/清理未完成分片"用。
+ * 与 resolveContainedOutputDir 同一条判据：投影到真实位置之后必须在下载根之内。
+ */
+function checkCleanupTarget(candidate, roots, options) {
+  const opts = options || {};
+  const want = safeText(candidate, 1024).trim();
+  if (!want || !path.isAbsolute(want)) {
+    return { ok: false, code: 'temp_dir_not_absolute', error: '清理分片只能针对绝对路径的下载目录，当前是「' + want + '」。' };
+  }
+  if (!Array.isArray(roots) || !roots.length) {
+    return { ok: false, code: 'no_download_root', error: '这台机器还没有指定下载根目录，因此不删除任何文件。请先在清影下载器界面「保存位置」里选一个下载目录。' };
+  }
+  const target = path.resolve(want);
+  const projected = projectRealPath(target, opts.realpathSync);
+  if (!projected) {
+    return { ok: false, code: 'temp_dir_unreachable', error: '这个目录读不出来，不删除任何文件：' + target + '。' };
+  }
+  const realRoots = roots.map((root) => {
+    const resolvedRoot = path.resolve(root);
+    return { given: resolvedRoot, real: projectRealPath(resolvedRoot, opts.realpathSync) || resolvedRoot };
+  });
+  const hit = realRoots.find((entry) => pathIsInside(entry.real, projected));
+  if (!hit) {
+    return { ok: false, code: 'temp_dir_outside_root', error: '这个目录不在已指定的下载根目录之内，不删除任何文件：' + target + '（真实位置 ' + projected + '）。允许的范围是：' + realRoots.map((entry) => entry.given).join(' / ') + '。要清别处的分片，先把界面里的下载目录指过去。' };
+  }
+  return { ok: true, resolved: target, real: projected, root: hit.given };
 }
 
 const HISTORY_LIMIT = 200;
@@ -1870,9 +2051,19 @@ module.exports = {
   runImageListDownload,
   buildCookieHeader,
   dataPaths,
+  readJsonFile,
+  writeJsonFile,
   readSettings,
   writeSettings,
   readSettingsFromValue,
+  DOWNLOAD_ROOTS_ENV,
+  normalizeOutputRoots,
+  downloadRoots,
+  pathIsInside,
+  projectRealPath,
+  resolveContainedOutputDir,
+  allowedCleanupRoots,
+  checkCleanupTarget,
   readHistory,
   appendHistory,
   clearHistory,
