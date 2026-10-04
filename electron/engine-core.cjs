@@ -106,6 +106,19 @@ const LOGIN_SITES = {
 const SITE_IDS = Object.keys(LOGIN_SITES);
 const DEFAULT_FILENAME_TEMPLATE = '%(title).180B [%(id)s].%(ext)s';
 
+// 界面用的站点表：从上面唯一一份定义派生（界面再抄一遍域名就会和这里分叉）。
+function siteCatalog() {
+  return SITE_IDS.map((siteId) => ({
+    id: siteId,
+    label: LOGIN_SITES[siteId].label,
+    domains: LOGIN_SITES[siteId].domains,
+    content_kind: LOGIN_SITES[siteId].contentKind,
+    login_required: LOGIN_SITES[siteId].loginRequired,
+    login_prompt: LOGIN_SITES[siteId].loginPrompt,
+    engine_kind: LOGIN_SITES[siteId].contentKind === 'images' ? '图集为主' : '视频为主',
+  }));
+}
+
 // 允许出现在命名模板里的 yt-dlp 字段（白名单，防止把用户输入拼成任意参数）。
 const TEMPLATE_FIELDS = [
   'title', 'id', 'ext', 'uploader', 'channel', 'autonumber',
@@ -776,40 +789,72 @@ function parseGalleryDlJson(stdout) {
 }
 
 // ── 引擎判定：一个链接进来，谁先上、为什么、失败后换谁 ─────────────────────
+// 返回的 chain 是**完整判定过程**（含本机不可用的那一步，标 unavailable），
+// executable 才是真会跑的序列。界面把 chain 原样摊开，用户看得见"为什么用它、
+// 备胎为什么没上"，降级永远不会是静默的。
 function planEngine(url, engines, preference) {
   const site = matchLoginSite(url);
-  const chain = [];
-  const has = (name) => Boolean(engines && engines[name] && engines[name].available);
-  const first = preference === 'yt-dlp' || preference === 'gallery-dl' ? preference : 'yt-dlp';
-  const second = first === 'yt-dlp' ? 'gallery-dl' : 'yt-dlp';
+  // 探测结果用的键是 yt_dlp / gallery_dl（下划线），决策里说的是 yt-dlp / gallery-dl（连字符）。
+  // 这里必须换算，否则"备胎在不在本机"永远被判成不在 —— 界面会说假话。
+  const keyOf = (name) => (name === 'yt-dlp' ? 'yt_dlp' : name === 'gallery-dl' ? 'gallery_dl' : name);
+  const has = (name) => Boolean(engines && engines[keyOf(name)] && engines[keyOf(name)].available);
+  const imageSite = Boolean(site && site.contentKind === 'images');
 
-  if (preference === 'yt-dlp' || preference === 'gallery-dl') {
-    chain.push({
-      engine: first,
-      reason: preference === 'gallery-dl'
-        ? '设置里指定了 gallery-dl（图片链路优先）'
-        : '设置里指定了 yt-dlp（视频链路优先）',
+  // yt-dlp 先上：它能给出作者/标题/画质；图集链接在它手里会"没有音视频格式"，
+  // 那正是降级 gallery-dl 的信号。
+  const ordered = imageSite
+    ? [
+      { engine: 'yt-dlp', why: (site.label + ' 的链接先按视频解析，能拿到作者与标题等元信息') },
+      { engine: 'gallery-dl', why: 'yt-dlp 没有给出音视频格式时，说明这条链接是图集，自动降级 gallery-dl' },
+    ]
+    : [
+      {
+        engine: 'yt-dlp',
+        why: site ? site.label + ' 属于视频站点，用 yt-dlp 取画质与音轨' : '通用链接按视频解析，用 yt-dlp 取画质与音轨',
+      },
+      { engine: 'gallery-dl', why: 'yt-dlp 判定这条链接其实是图片时，自动降级 gallery-dl' },
+    ];
+
+  const wanted = preference === 'yt-dlp' || preference === 'gallery-dl' ? preference : '';
+  let chain = ordered.map((step, index) => ({
+    engine: step.engine,
+    role: index === 0 ? 'primary' : 'fallback',
+    reason: step.why,
+    available: has(step.engine),
+  }));
+
+  if (wanted) {
+    const chosen = chain.filter((step) => step.engine === wanted).concat(chain.filter((step) => step.engine !== wanted));
+    const label = wanted === 'gallery-dl' ? '图片链路' : '视频链路';
+    chosen.forEach((step, index) => {
+      step.reason = index === 0
+        ? '设置里指定了 ' + wanted + '（' + label + '优先）'
+        : '指定引擎没有可用结果时自动改用另一个引擎';
     });
-    if (has(second)) chain.push({ engine: second, reason: '首选引擎没有可用结果时自动改用另一个引擎' });
-  } else if (site && site.contentKind === 'images') {
-    chain.push({ engine: 'yt-dlp', reason: site.label + ' 的链接先按视频解析，能拿到作者与标题等元信息' });
-    if (has('gallery-dl')) {
-      chain.push({ engine: 'gallery-dl', reason: 'yt-dlp 没有给出音视频格式时，说明这条链接是图集，自动降级 gallery-dl' });
-    } else {
-      chain.push({ engine: 'gallery-dl', reason: '需要降级到图片链路，但本机没有可用的 gallery-dl', unavailable: true });
-    }
-  } else {
-    chain.push({
-      engine: 'yt-dlp',
-      reason: site ? site.label + ' 属于视频站点，用 yt-dlp 取画质与音轨' : '通用链接按视频解析，用 yt-dlp 取画质与音轨',
-    });
-    if (has('gallery-dl')) {
-      chain.push({ engine: 'gallery-dl', reason: 'yt-dlp 判定这条链接其实是图片时，自动降级 gallery-dl' });
-    } else {
-      chain.push({ engine: 'gallery-dl', reason: '若这条链接其实是图片，需要 gallery-dl，但本机没有可用的 gallery-dl', unavailable: true });
+    chain = chosen;
+  }
+  chain.forEach((step, index) => { step.role = index === 0 ? 'primary' : 'fallback'; });
+
+  for (const step of chain) {
+    if (!step.available) {
+      step.unavailable = true;
+      step.reason += '；但本机没有可用的 ' + step.engine + '，这一步跑不了';
     }
   }
-  return { chain, primary: chain[0].engine, site };
+
+  const executable = chain.filter((step) => step.available);
+  // 偏好引擎在本机根本不可用时，实际执行的引擎必须说清理由，不能沿用"设置里指定了 X"。
+  if (wanted && !has(wanted) && executable.length) {
+    executable[0].reason = '设置里指定的 ' + wanted + ' 在本机不可用，这次实际改用 ' + executable[0].engine;
+  }
+
+  return {
+    chain,
+    executable,
+    primary: executable.length ? executable[0].engine : '',
+    site,
+    preference: wanted || 'auto',
+  };
 }
 
 // ── 解析：yt-dlp 主链路 ───────────────────────────────────────────────────
@@ -880,9 +925,15 @@ async function analyzeWithGalleryDl(spec) {
 }
 
 // ── 失败归因：把引擎的原始抱怨翻译成"下一步能点什么" ───────────────────────
+// 六条出路必须分得开，因为它们下一步完全不同：
+//   链接不支持(unsupported_url) / 链接已失效(link_gone) / 需要登录(login_required)
+//   站点改版(site_changed) / 网络或代理(network|proxy) / 引擎未装(engine_missing)
 const LOGIN_PATTERNS = /\b(login|log-in|sign in|signin|cookies?|authentication|unauthorized|forbidden|vip|premium|private|access denied|restricted)\b/i;
-const NETWORK_PATTERNS = /\b(timed out|timeout|connection|network|unreachable|resolve|proxy|ssl|tls|econnrefused|getaddrinfo|retrying)\b/i;
+const NETWORK_PATTERNS = /\b(timed out|timeout|connection|network|unreachable|resolve|econnrefused|getaddrinfo|retrying)\b/i;
+const PROXY_PATTERNS = /\b(proxy|proxies|407|tunnel)\b|certificate|x509|self[- ]signed|ssl (?:error|handshake|certificate)|tls (?:error|handshake)|unable to get local issuer/i;
 const RATE_PATTERNS = /\b(too many|429|rate limit|slow down|blocked|flood)\b/i;
+const SITE_CHANGED_PATTERNS = /please report this issue|unable to extract|could not find .* (?:in|on) |extractor (?:error|failed)|unsupported url.*extractor/i;
+const LINK_GONE_PATTERNS = /http error 40[49]|http error 410|\bnot found\b|video unavailable|private video|内容已被删除|链接已失效/i;
 const LOGIN_HINTS_CN = ['登录', '风控', '验证', '权限', '会员'];
 const NETWORK_HINTS_CN = ['超时', '连接', '网络', '代理'];
 
@@ -894,10 +945,14 @@ function classifyParseError(message, site, engineName) {
 
   if (/engine_missing|找不到引擎/.test(lowered) || /was not found|is not recognized/.test(lowered)) {
     kind = 'engine_missing';
-    remedies.push({ action: 'install_engine', label: '检查引擎', detail: '本机没有可用的 ' + (engineName || '引擎') + '，安装或在设置里指到引擎目录后点"重新探测"。' });
+    remedies.push({ action: 'install_engine', label: '检查引擎', detail: '本机没有可用的 ' + (engineName || '引擎') + '，安装或在"引擎目录"里指到 yt-dlp / gallery-dl / ffmpeg 所在文件夹后点"重新探测"。' });
+  } else if (PROXY_PATTERNS.test(lowered)) {
+    kind = 'proxy';
+    remedies.push({ action: 'check_network', label: '检查代理设置', detail: '这一步被代理或 TLS 拦下了（代理拒绝、407、证书或隧道错误）。本机需要代理时，请先设好 HTTPS_PROXY / 系统代理，或换一条能直连的网络再重试。' });
+    remedies.push({ action: 'retry', label: '改好代理后重试' });
   } else if (RATE_PATTERNS.test(lowered) || lowered.includes('限流')) {
     kind = 'rate_limited';
-    remedies.push({ action: 'wait_retry', label: '稍后重试', detail: '站点在限流，一般等 1-3 分钟再解析同一链接。' });
+    remedies.push({ action: 'wait_retry', label: '稍后重试', detail: '站点在限流，一般等 1-3 分钟再解析同一链接；期间不要连续重试，那只会延长被限流的时间。' });
   } else if (LOGIN_PATTERNS.test(lowered) || LOGIN_HINTS_CN.some((hint) => text.includes(hint))) {
     kind = site ? 'login_required' : 'needs_login';
     const blocked = /http error 40[13]|forbidden|bot confirm|cloudflare/i.test(lowered);
@@ -905,23 +960,35 @@ function classifyParseError(message, site, engineName) {
       remedies.push({ action: 'login', label: '登录 ' + site.label, detail: site.loginPrompt });
       remedies.push({ action: 'open_site', label: '在浏览器打开这条链接', detail: '先确认自己在浏览器里能正常看到内容（打不开说明链接失效或需要权限）。' });
     } else {
-      remedies.push({ action: 'open_site', label: '在浏览器打开这条链接', detail: '确认内容是否公开可见。' });
+      remedies.push({ action: 'open_site', label: '在浏览器打开这条链接', detail: '确认内容是否公开可见；这个站点没有登录会话可用，只能匿名解析。' });
     }
     if (blocked) {
       remedies.push({ action: 'retry', label: '换个网络或代理后重试', detail: '站点直接拒绝了这条数据的下载（403/401）：可能是需要登录、当前 IP 或代理被风控、也可能是解析出的直链已过期。页面能解析不代表能取流。' });
     }
+  } else if (LINK_GONE_PATTERNS.test(lowered)) {
+    kind = 'link_gone';
+    remedies.push({ action: 'open_site', label: '在浏览器打开这条链接', detail: '内容大概率已被删除、设为私密或原作者撤回 —— 这类链接换引擎也没用。' });
+    remedies.push({ action: 'copy_link', label: '回到输入框换一条链接', detail: '从站点页面重新分享一次链接（分享链常带签名，过期后就取不到了）。' });
   } else if (NETWORK_PATTERNS.test(lowered) || NETWORK_HINTS_CN.some((hint) => text.includes(hint))) {
     kind = 'network';
-    remedies.push({ action: 'check_network', label: '检查网络/代理', detail: '解析需要能访问该站点；代理走系统设置或 HTTPS_PROXY 环境变量，改好后重试。' });
-    remedies.push({ action: 'retry', label: '重试解析', detail: '' });
-  } else if (/no formats|unsupported|not supported|unable to extract/i.test(text)) {
-    kind = 'unsupported_site';
+    remedies.push({ action: 'check_network', label: '检查网络/代理', detail: '解析需要能访问该站点；本机走代理时请在系统设置或 HTTPS_PROXY 环境变量里指好，改好后重试。' });
+    remedies.push({ action: 'retry', label: '重试解析' });
+  } else if (SITE_CHANGED_PATTERNS.test(text)) {
+    kind = site ? 'site_changed' : 'unsupported_site';
+    remedies.push({ action: 'update_engine', label: '更新引擎后重新探测', detail: '引擎自己说"请把这个 issue 报告上去"，或某个字段抽不出来了 —— 这通常是站点改版而本机 yt-dlp / gallery-dl 版本落后，升级引擎常能直接解决。' });
+    if (site) {
+      remedies.push({ action: 'other_engine', label: '改用另一个引擎重试', detail: site.label + ' 改版时，另一条链路有时还读得到。' });
+    }
+    remedies.push({ action: 'retry', label: '稍后重试', detail: '站点改版期间，服务端返回可能还不稳定。' });
+  } else if (/no formats|unsupported|not supported|unable to (?:find|download)/i.test(text)) {
+    kind = 'unsupported_url';
+    remedies.push({ action: 'check_page_type', label: '确认这是具体内容页', detail: '首页、搜索结果页、用户主页这类"不是单条内容"的地址，引擎没有可下载的东西；请打开一条视频/笔记后再复制链接。' });
     remedies.push({ action: 'other_engine', label: '改用另一个引擎重试', detail: '视频与图集走的是不同引擎，换一次常能出结果。' });
-    remedies.push({ action: 'open_site', label: '在浏览器打开这条链接', detail: '确认这是具体内容页，不是首页或搜索结果页。' });
+    remedies.push({ action: 'open_site', label: '在浏览器打开这条链接', detail: '确认链接没有指向登录墙或跳转中间页。' });
   } else {
     kind = 'unknown';
-    remedies.push({ action: 'retry', label: '重试解析', detail: '' });
-    remedies.push({ action: 'other_engine', label: '改用另一个引擎重试', detail: '' });
+    remedies.push({ action: 'retry', label: '重试解析' });
+    remedies.push({ action: 'other_engine', label: '改用另一个引擎重试' });
   }
   remedies.push({ action: 'copy_diagnostics', label: '复制诊断信息', detail: '把引擎原始输出带给开发者或 issue。' });
   return { kind, message: text, remedies };
@@ -939,10 +1006,8 @@ async function analyzeUrl(spec) {
   const engines = spec.engines || {};
   const plan = planEngine(url, engines, spec.preference);
   const attempts = [];
-  const chain = plan.chain.filter((step) => {
-    const record = engines[step.engine === 'yt-dlp' ? 'yt_dlp' : 'gallery_dl'];
-    return Boolean(record && record.available);
-  });
+  const chain = plan.executable;
+  const planText = plan.chain.map((step) => step.engine + '：' + step.reason).join('；');
 
   if (!chain.length) {
     return {
@@ -950,8 +1015,9 @@ async function analyzeUrl(spec) {
       error: '本机没有可用的下载引擎（yt-dlp 与 gallery-dl 都没找到或版本探测失败）。',
       kind: 'engine_missing',
       engine: '',
-      engine_reason: plan.chain.map((s) => s.engine + '：' + s.reason).join('；'),
-      remedies: [{ action: 'install_engine', label: '检查引擎', detail: '安装 yt-dlp（视频）与 gallery-dl（图片）后重新探测。' }],
+      engine_reason: planText,
+      engine_plan: plan.chain,
+      remedies: [{ action: 'install_engine', label: '检查引擎', detail: '安装 yt-dlp（视频）与 gallery-dl（图片），或在"本机引擎"面板把"引擎目录"指到它们所在的文件夹，然后点"重新探测"。' }],
       engine_attempts: attempts,
     };
   }
@@ -972,10 +1038,11 @@ async function analyzeUrl(spec) {
       error: site.loginPrompt,
       kind: 'login_required',
       engine: '',
-      engine_reason: plan.chain.map((s) => s.engine + '：' + s.reason).join('；'),
+      engine_reason: planText,
+      engine_plan: plan.chain,
       remedies: [
         { action: 'login', label: '登录 ' + site.label, detail: '登录窗口关闭后会自动重新检测登录态。' },
-        { action: 'retry', label: '登录后重试', detail: '' },
+        { action: 'retry', label: '登录后重试' },
       ],
       engine_attempts: attempts,
     };
@@ -1004,8 +1071,11 @@ async function analyzeUrl(spec) {
       const usedChain = attempts.concat([{ engine: result.engine, outcome: 'ok', ms: Date.now() - startedAt, detail: step.reason }]);
       const imageOnly = !result.data.videos.length && !result.data.audios.length && result.data.images.length > 0;
       result.data.engine = result.engine;
+      result.data.engine_version = record && record.version ? record.version : '';
+      result.data.engine_source = record && record.source ? record.source : '';
       result.data.engine_reason = describeEngineChoice(result.engine, step.reason, usedChain, imageOnly, Boolean(cookieFile));
       result.data.engine_chain = usedChain;
+      result.data.engine_plan = plan.chain;
       result.data.cookie_source = cookieFrom;
       if (spec.fetchThumbnail && result.data.thumbnailUrl) {
         result.data.thumbnail = await fetchThumbnailDataUrl(result.data.thumbnailUrl, url, spec.fetchThumbnail);
@@ -1034,6 +1104,7 @@ async function analyzeUrl(spec) {
         remedies: diagnosis.remedies,
         engine: '',
         engine_reason: attempts.map((a) => a.engine + ' ' + a.outcome).join(' -> '),
+        engine_plan: plan.chain,
         engine_attempts: attempts,
       };
     }
@@ -1047,6 +1118,7 @@ async function analyzeUrl(spec) {
     remedies: diagnosis.remedies,
     engine: '',
     engine_reason: attempts.map((a) => a.engine + ' ' + a.outcome).join(' -> '),
+    engine_plan: plan.chain,
     engine_attempts: attempts,
   };
 }
@@ -1149,6 +1221,145 @@ function diffFiles(before, after) {
   return after.filter((f) => !seen.has(f.path));
 }
 
+// ── 未完成的分片（.part / .ytdl / .temp）───────────────────────────────────
+// 暂停与取消都**保留**分片，配合 --continue 是续传而不是从头再来；崩溃后留下的
+// 孤儿分片没人认领，所以给一个只按扩展名判定的清点/清理入口（只碰给定目录，
+// 只删引擎临时后缀，绝不碰成品文件）。
+const TEMP_SUFFIXES = ['.part', '.ytdl', '.temp'];
+
+function isEngineTempFile(name) {
+  const lower = String(name).toLowerCase();
+  return TEMP_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+}
+
+function scanEngineTempFiles(dir, options = {}) {
+  const maxDepth = options.maxDepth === undefined ? 3 : options.maxDepth;
+  const absolute = safeText(dir, 1024).trim();
+  if (!absolute || !path.isAbsolute(absolute)) return { dir: absolute, valid: false, files: [], count: 0, bytes: 0, oldest: '' };
+  let stat;
+  try {
+    stat = fs.statSync(absolute);
+  } catch {
+    return { dir: absolute, valid: false, exists: false, files: [], count: 0, bytes: 0, oldest: '' };
+  }
+  if (!stat.isDirectory()) return { dir: absolute, valid: false, files: [], count: 0, bytes: 0, oldest: '' };
+  const found = [];
+  const walk = (current, depth) => {
+    if (depth > maxDepth) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) walk(full, depth + 1);
+      else if (entry.isFile() && isEngineTempFile(entry.name)) {
+        try {
+          const fileStat = fs.statSync(full);
+          found.push({ path: full, bytes: fileStat.size, mtimeMs: fileStat.mtimeMs });
+        } catch {}
+      }
+    }
+  };
+  walk(absolute, 0);
+  found.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  return {
+    dir: absolute,
+    valid: true,
+    files: found,
+    count: found.length,
+    bytes: found.reduce((sum, file) => sum + file.bytes, 0),
+    oldest: found.length ? new Date(found[0].mtimeMs).toISOString() : '',
+  };
+}
+
+// 只删给定目录内、后缀确实是引擎临时文件的条目；其余一律不动。
+function removeEngineTempFiles(dir, options = {}) {
+  const scan = options.scan || scanEngineTempFiles(dir, options);
+  const removed = [];
+  const failed = [];
+  if (!scan.valid) return { removed, failed, count: 0, bytes: 0, error: '下载目录不可用，没有删除任何文件。' };
+  const root = path.resolve(scan.dir);
+  for (const file of scan.files) {
+    const resolved = path.resolve(file.path);
+    const inside = path.dirname(resolved) === root || path.dirname(resolved).startsWith(root + path.sep);
+    if (!inside || !isEngineTempFile(path.basename(resolved))) {
+      failed.push({ path: file.path, reason: '不在给定目录内或不是引擎临时文件' });
+      continue;
+    }
+    try {
+      fs.unlinkSync(resolved);
+      removed.push(file);
+    } catch (error) {
+      failed.push({ path: file.path, reason: safeText(error.message, 120) });
+    }
+  }
+  return {
+    removed,
+    failed,
+    count: removed.length,
+    bytes: removed.reduce((sum, file) => sum + file.bytes, 0),
+  };
+}
+
+// 设置里的"引擎目录"是不是还在（用户搬过安装包就会留下指向旧位置的死路径）。
+function enginesDirStatus(dir) {
+  const value = safeText(dir, 1024).trim();
+  if (!value) return { configured: false, path: '', exists: false, engines: [], note: '没有设置引擎目录，按环境变量、应用内 resources/bin 与 PATH 依次查找。' };
+  let exists = false;
+  try {
+    exists = fs.statSync(value).isDirectory();
+  } catch {}
+  const present = ['yt-dlp', 'gallery-dl', 'ffmpeg'].filter((name) => {
+    try {
+      return fs.existsSync(path.join(value, name + '.exe')) || fs.existsSync(path.join(value, name));
+    } catch {
+      return false;
+    }
+  });
+  return {
+    configured: true,
+    path: value,
+    exists,
+    engines: present,
+    note: exists
+      ? (present.length ? '目录里有 ' + present.join(' / ') + '。' : '目录存在，但里面没有 yt-dlp / gallery-dl / ffmpeg。')
+      : '目录不存在（可能被移动或改名过）—— 本机的 ' + (present.length ? '' : 'gallery-dl / ffmpeg ') + '因此报未安装，请重新指一次。',
+  };
+}
+
+// yt-dlp 报"这个文件落到哪里了"的行式样（真实输出形状）：落盘核对要把这些路径收下来，
+// 否则同名文件早就存在时 mtime 不新，一次成功的下载会被报成 0 字节。
+const DESTINATION_PATTERNS = [
+  /^\[download\] Destination: (.+)$/,
+  /^\[download\] (.+?) has already been downloaded$/,
+  /^\[(?:ExtractAudio|VideoConvertor|FixupM4a|FixupStereo|FixupWebmExtension|MergeVCodecs)\] Destination: (.+)$/,
+  /^\[Merger\] Merging formats into "(.+)"$/,
+  /^\[download\] File was renamed to: (.+)$/,
+];
+
+function extractDestination(line) {
+  for (const pattern of DESTINATION_PATTERNS) {
+    const match = pattern.exec(line);
+    if (match) return safeText(match[1], 1024).replace(/^"|"$/g, '').trim();
+  }
+  return '';
+}
+
+// 解析单行引擎输出：百分比/速度/剩余时间都来自 --progress-template 的真实字段。
+function parseEngineLine(line) {
+  const text = safeText(line, 2000);
+  if (text.startsWith('download:')) {
+    const [percent, speed, eta] = text.slice(9).split('|');
+    return { type: 'progress', percent: safeText(percent, 20).trim(), speed: safeText(speed, 30).trim(), eta: safeText(eta, 30).trim() };
+  }
+  const destination = extractDestination(text);
+  if (destination) return { type: 'destination', path: destination };
+  return { type: 'log', text };
+}
+
 // 跑一次 yt-dlp 下载：进度回调 + 落盘核对（真实路径与字节数）。
 function runEngineDownload(spec, hooks) {
   const h = hooks || {};
@@ -1176,27 +1387,22 @@ function runEngineDownload(spec, hooks) {
     let settled = false;
     const destinations = new Set();
 
+    // 引擎多吐一行没见过的东西，绝不能把整个进程带走（这里是主进程/接口服务本体）。
     const handleLine = (line) => {
-      if (line.startsWith('download:')) {
-        const [percent, speed, eta] = line.slice(9).split('|');
-        if (typeof h.onProgress === 'function') {
-          h.onProgress({
-            type: 'progress',
-            percent: safeText(percent, 20).trim(),
-            speed: safeText(speed, 30).trim(),
-            eta: safeText(eta, 30).trim(),
-          });
-        }
+      let parsed;
+      try {
+        parsed = parseEngineLine(line);
+      } catch (error) {
+        parsed = { type: 'log', text: safeText(line, 500) };
+        if (typeof h.onLog === 'function') h.onLog('[line parse failed] ' + safeText(error && error.message, 120));
         return;
       }
-      for (const pattern of DESTINATION_PATTERNS) {
-        const match = pattern.exec(line);
-        if (match) {
-          destinations.add(match[1].replace(/^"|"$/g, ''));
-          break;
-        }
+      if (parsed.type === 'progress') {
+        if (typeof h.onProgress === 'function') h.onProgress(parsed);
+        return;
       }
-      if (typeof h.onLog === 'function') h.onLog(safeText(line, 500));
+      if (parsed.type === 'destination') destinations.add(parsed.path);
+      if (typeof h.onLog === 'function') h.onLog(safeText(parsed.text, 500));
     };
 
     const stdoutLines = createLineConsumer((line) => handleLine(line));
@@ -1302,12 +1508,16 @@ function runGalleryDlDownload(spec, hooks) {
     let done = 0;
 
     const lines = createLineConsumer((line) => {
-      const hit = /File \d+ (?:already downloaded|downloaded)/i.exec(line);
-      if (hit) {
-        done += 1;
-        if (typeof h.onProgress === 'function') h.onProgress({ type: 'progress', percent: '', speed: '', eta: '第 ' + done + ' 个' });
+      try {
+        const hit = /File \d+ (?:already downloaded|downloaded)/i.exec(line);
+        if (hit) {
+          done += 1;
+          if (typeof h.onProgress === 'function') h.onProgress({ type: 'progress', percent: '', speed: '', eta: '第 ' + done + ' 个' });
+        }
+        if (typeof h.onLog === 'function') h.onLog(safeText(line, 500));
+      } catch (error) {
+        if (typeof h.onLog === 'function') h.onLog('[line parse failed] ' + safeText(error && error.message, 120));
       }
-      if (typeof h.onLog === 'function') h.onLog(safeText(line, 500));
     });
 
     const finish = (r) => {
@@ -1453,11 +1663,13 @@ function readJsonFile(file, fallback) {
 function writeJsonFile(file, value) {
   ensureDirSync(path.dirname(file));
   const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 });
   try {
-    if (fs.existsSync(file)) fs.unlinkSync(file);
-  } catch {}
-  fs.renameSync(tmp, file);
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch (error) {
+    try { fs.rmSync(tmp, { force: true }); } catch {}
+    throw error;
+  }
   return value;
 }
 
@@ -1599,6 +1811,7 @@ function authSnapshotFromExports(root) {
 module.exports = {
   LOGIN_SITES,
   SITE_IDS,
+  siteCatalog,
   DEFAULT_FILENAME_TEMPLATE,
   DEFAULT_SETTINGS,
   TEMPLATE_FIELDS,
@@ -1645,6 +1858,13 @@ module.exports = {
   buildDownloadArgs,
   listFiles,
   diffFiles,
+  DESTINATION_PATTERNS,
+  extractDestination,
+  parseEngineLine,
+  isEngineTempFile,
+  scanEngineTempFiles,
+  removeEngineTempFiles,
+  enginesDirStatus,
   runEngineDownload,
   runGalleryDlDownload,
   runImageListDownload,

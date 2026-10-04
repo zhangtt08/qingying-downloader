@@ -14,6 +14,7 @@
   --fog: #9eb0c5;
   --danger: #ff8290;
   --success: #79e0b3;
+  --warning: #ffcb6b;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -1186,7 +1187,7 @@ button:focus-visible {
 }
 
 .auth-row .dot.expired {
-  background: #ffcb6b;
+  background: var(--warning);
   box-shadow: 0 0 0 3px rgba(255, 203, 107, 0.16);
 }
 
@@ -1418,9 +1419,128 @@ button:focus-visible {
   transition: width 0.35s var(--ease-out);
 }
 
-.task-row.status-done { border-color: rgba(121, 224, 179, 0.36); }
-.task-row.status-failed { border-color: rgba(255, 130, 144, 0.42); }
-.task-row.status-paused { border-color: rgba(255, 203, 107, 0.42); }
+/* 状态色语义：成功=绿、失败=红、需人介入（暂停/过期）=黄、进行中=蓝、中止=灰。
+   队列与下载记录共用同一套，不再各自定义。 */
+.task-row.status-done,
+.history-row.status-done { border-color: rgba(121, 224, 179, 0.36); }
+.task-row.status-failed,
+.history-row.status-failed { border-color: rgba(255, 130, 144, 0.42); }
+.task-row.status-paused,
+.history-row.status-paused { border-color: rgba(255, 203, 107, 0.42); }
+.task-row.status-cancelled,
+.history-row.status-cancelled { border-color: rgba(158, 176, 197, 0.32); }
+.task-row.status-downloading { border-color: rgba(111, 168, 255, 0.46); }
+.task-row.status-queued { border-color: var(--line); }
+
+.task-remedy-detail {
+  flex-basis: 100%;
+  margin: 2px 0 0;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: var(--fog);
+}
+
+/* 引擎判定过程 */
+.chain-list {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chain-step {
+  padding: 7px 9px;
+  border-left: 3px solid var(--line-strong);
+  border-radius: 0 9px 9px 0;
+  background: rgba(17, 34, 56, 0.5);
+}
+
+.chain-step strong {
+  display: block;
+  font-size: 0.76rem;
+  color: #eaf3fb;
+}
+
+.chain-step small {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.7rem;
+  line-height: 1.45;
+  color: var(--fog);
+}
+
+.chain-step.outcome-ok { border-left-color: var(--success); }
+.chain-step.outcome-failed { border-left-color: var(--danger); }
+.chain-step.outcome-no_formats,
+.chain-step.outcome-no_result { border-left-color: var(--warning); }
+.chain-step.outcome-unavailable { border-left-color: var(--fog); opacity: 0.86; }
+
+.kind-line {
+  margin: 6px 0 0;
+  font-size: 0.72rem;
+  color: var(--fog);
+  word-break: break-all;
+}
+
+.input-hint {
+  margin: 8px 0 0;
+  font-size: 0.71rem;
+  color: var(--fog);
+}
+
+.side-panel-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.side-note.warn { color: var(--warning); }
+
+.auth-kind {
+  margin-top: 1px;
+  color: rgba(158, 176, 197, 0.82);
+}
+
+.temp-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px dashed rgba(255, 203, 107, 0.42);
+  border-radius: 11px;
+  background: rgba(255, 203, 107, 0.06);
+}
+
+.temp-row .side-note { flex: 1; min-width: 12rem; margin: 0; }
+
+.mini-button.danger {
+  color: var(--ink);
+  background: var(--warning);
+  border-color: var(--warning);
+}
+
+#template.invalid {
+  border-color: rgba(255, 130, 144, 0.66);
+}
+
+/* 长列表可滚：队列与记录都可能上百条，不能把页面拉成无尽长条 */
+.task-list,
+.history-list {
+  max-height: 30rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+
+.task-list > *,
+.history-list > * {
+  min-width: 0;
+}
 
 .list-empty {
   margin: 6px 0 0;

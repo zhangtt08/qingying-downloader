@@ -86,6 +86,9 @@ function ffmpegLocation() {
 
 async function probeEngines() {
   enginesCache = await core.probeEngines(engineOptions());
+  // 如实交代"设置里的引擎目录还在不在"——用户搬过安装包时，这是唯一能解释
+  // 为什么 gallery-dl / ffmpeg 报未安装的原因。
+  enginesCache.engines_dir = core.enginesDirStatus(core.readSettings(DATA_DIR()).enginesDir);
   return enginesCache;
 }
 
@@ -131,7 +134,21 @@ async function collectAuthSnapshot() {
       checked_at: new Date().toISOString(),
     };
   }
-  const snapshot = { sites, updated_at: new Date().toISOString(), source: 'electron_session' };
+  const snapshot = {
+    sites,
+    updated_at: new Date().toISOString(),
+    source: 'electron_session',
+    storage: {
+      data_dir: DATA_DIR(),
+      session_dir: path.join(app.getPath('userData'), 'Partitions'),
+      session_dir_note: '每个站点一个独立的浏览器分区（persist:qy…），由当前 Windows 账户的目录权限隔离，不与其他程序共用。',
+      cookie_dir: core.dataPaths(DATA_DIR()).cookieDir,
+      cookie_dir_note: '只有点了"导出给命令行"才会写出 Netscape 文件；写出时按 0600 请求，落在当前用户目录下，随时可撤销（撤销即删除该文件）。',
+      exported: SITE_IDS.filter((id) => Boolean(core.exportedCookieFile(DATA_DIR(), id))),
+      cookie_values_stored: false,
+    },
+    privacy: '这里只输出状态、Cookie 名称与过期时间；任何界面、日志、接口返回都不包含 Cookie 值。',
+  };
   core.writeAuthState(DATA_DIR(), snapshot);
   return snapshot;
 }
@@ -243,13 +260,18 @@ function taskView(task) {
     kind: task.kind,
     remedies: task.remedies,
     file_count: task.files.length,
-    files: task.files.slice(0, 12),
+    files: task.files.slice(0, 12).map((file) => ({
+      path: core.safeText(file.path, 1024),
+      bytes: Number(file.bytes) || 0,
+      size: core.formatBytes(Number(file.bytes)) || '',
+    })),
     bytes: task.bytes,
     size_text: core.formatBytes(task.bytes) || '',
     output_dir: task.outputDir,
     created_at: task.created_at,
     started_at: task.started_at,
     finished_at: task.finished_at,
+    retrying: Boolean(task.timer),
     log_tail: core.safeText(task.log, 400),
   };
 }
@@ -296,7 +318,11 @@ function publicSettings() {
 function pumpQueue() {
   const limit = core.readSettings(DATA_DIR()).concurrency;
   while (runningCount < limit) {
-    const next = taskOrder.map((id) => tasks.get(id)).find((task) => task && task.status === 'queued');
+    // 正在等自动重试倒计时的任务不算"可以马上开跑"，否则退避形同没有（站点限流时
+    // 立刻重打等于自己把自己锤死）。
+    const next = taskOrder
+      .map((id) => tasks.get(id))
+      .find((task) => task && task.status === 'queued' && !task.timer);
     if (!next) break;
     void runTask(next);
   }
@@ -383,7 +409,15 @@ async function runTask(task) {
       const wantGallery = (task.engine === 'gallery-dl' || settings.enginePreference === 'gallery-dl')
         && engines.gallery_dl?.available;
       if (wantGallery) {
-        result = await core.runGalleryDlDownload({ url: task.url, outputDir: task.outputDir, site, cookieFile }, hooks);
+        // engineOptions 必须传下去：gallery-dl 常常只在"引擎目录"（安装包 resources/bin）里，
+        // 不在 PATH 上；漏了它就会出现"解析得到、下载却说没装"的自相矛盾。
+        result = await core.runGalleryDlDownload({
+          url: task.url,
+          outputDir: task.outputDir,
+          site,
+          cookieFile,
+          engineOptions: opts,
+        }, hooks);
       } else {
         const cookieHeader = site ? core.buildCookieHeader(site, await siteCookies(site), task.url) : '';
         result = await core.runImageListDownload({
@@ -477,6 +511,8 @@ function safeOrigin(url) {
 }
 
 function recordHistory(task) {
+  // 用户已经点"删除记录"的任务不要再从后台写回历史 —— 那是替用户做决定。
+  if (task.removed) return;
   try {
     core.appendHistory(DATA_DIR(), {
       id: task.id,
@@ -524,6 +560,9 @@ ipcMain.handle('app:get-info', () => ({
   platform: process.platform,
   data_dir: DATA_DIR(),
   packaged: app.isPackaged,
+  // 命名模板的允许字段：界面提示与校验共用同一份白名单。
+  template_fields: core.TEMPLATE_FIELDS,
+  default_template: core.DEFAULT_FILENAME_TEMPLATE,
 }));
 
 ipcMain.handle('clipboard:read', () => core.safeText(clipboard.readText(), 4096));
@@ -569,6 +608,43 @@ ipcMain.handle('engines:probe', async () => {
   await probeEngines();
   emitEngines();
   return enginesCache;
+});
+
+// 站点表只有一份：界面从这里读，不再自己抄一遍域名（抄第二遍就会和这里分叉）。
+ipcMain.handle('sites:list', () => core.siteCatalog());
+
+// 下载目录里残留的未完成分片（取消/崩溃留下的 .part / .ytdl / .temp）。
+ipcMain.handle('temp:scan', (_event, payload) => {
+  const folder = core.safeText(payload?.folder, 1024).trim() || core.readSettings(DATA_DIR()).outputDir;
+  const scan = core.scanEngineTempFiles(folder);
+  return { ...scan, files: scan.files.slice(0, 30), size_text: core.formatBytes(scan.bytes) || '0 B' };
+});
+
+ipcMain.handle('temp:clean', (_event, payload) => {
+  const folder = core.safeText(payload?.folder, 1024).trim() || core.readSettings(DATA_DIR()).outputDir;
+  const result = core.removeEngineTempFiles(folder);
+  emitQueue(true);
+  return {
+    removed: result.count,
+    bytes: result.bytes,
+    size_text: core.formatBytes(result.bytes) || '0 B',
+    failed: result.failed.slice(0, 5),
+    error: result.error || '',
+  };
+});
+
+// 把"引擎目录"指到 yt-dlp / gallery-dl / ffmpeg 所在的文件夹（安装包 resources/bin）。
+ipcMain.handle('engines:choose-dir', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory', 'createDirectory'],
+    title: '选择引擎所在目录',
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  core.writeSettings(DATA_DIR(), { enginesDir: result.filePaths[0] });
+  await probeEngines();
+  emitEngines();
+  emitQueue(true);
+  return { dir: result.filePaths[0], engines: enginesCache };
 });
 
 ipcMain.handle('settings:get', () => publicSettings());
@@ -649,6 +725,9 @@ ipcMain.handle('queue:retry', (_event, payload) => {
   task.attempts = 0;
   task.error = '';
   task.kind = '';
+  task.remedies = [];
+  task.log = '';
+  task.progress = { percent: '', speed: '', eta: '重新排队：引擎会带着 --continue 接着已下载的分片走' };
   pumpQueue();
   return true;
 });
@@ -662,6 +741,7 @@ ipcMain.handle('queue:remove', (_event, payload) => {
   const id = core.safeText(payload?.id, 40);
   const task = tasks.get(id);
   if (!task) return false;
+  task.removed = true;
   if (task.status === 'downloading') stopTask(task, { pause: false });
   if (task.timer) clearTimeout(task.timer);
   tasks.delete(id);

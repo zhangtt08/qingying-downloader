@@ -20,6 +20,8 @@ const elements = {
   errorCard: document.querySelector('#error-card'),
   errorSummary: document.querySelector('#error-summary'),
   errorDetail: document.querySelector('#error-detail'),
+  errorKind: document.querySelector('#error-kind'),
+  errorChainList: document.querySelector('#error-chain-list'),
   remedyList: document.querySelector('#remedy-list'),
 
   mediaCard: document.querySelector('#media-card'),
@@ -29,6 +31,8 @@ const elements = {
   title: document.querySelector('#title'),
   meta: document.querySelector('#meta'),
   engineLine: document.querySelector('#engine-line'),
+  engineChain: document.querySelector('#engine-chain'),
+  engineChainList: document.querySelector('#engine-chain-list'),
   videoField: document.querySelector('#video-field'),
   audioField: document.querySelector('#audio-field'),
   audioOutputField: document.querySelector('#audio-output-field'),
@@ -45,6 +49,9 @@ const elements = {
   taskList: document.querySelector('#task-list'),
   taskEmpty: document.querySelector('#task-empty'),
   clearFinished: document.querySelector('#clear-finished'),
+  tempRow: document.querySelector('#temp-row'),
+  tempNote: document.querySelector('#temp-note'),
+  tempClean: document.querySelector('#temp-clean'),
   settingConcurrency: document.querySelector('#setting-concurrency'),
   settingRetry: document.querySelector('#setting-retry'),
   settingEngine: document.querySelector('#setting-engine'),
@@ -54,11 +61,13 @@ const elements = {
   template: document.querySelector('#template'),
   templateReset: document.querySelector('#template-reset'),
   templateError: document.querySelector('#template-error'),
+  templateFieldHint: document.querySelector('#template-field-hint'),
   settingSubfolder: document.querySelector('#setting-subfolder'),
   settingExportCookies: document.querySelector('#setting-export-cookies'),
   dataDirNote: document.querySelector('#data-dir-note'),
 
   authList: document.querySelector('#auth-list'),
+  authStorageNote: document.querySelector('#auth-storage-note'),
   refreshAuth: document.querySelector('#refresh-auth'),
 
   historyList: document.querySelector('#history-list'),
@@ -68,6 +77,8 @@ const elements = {
 
   engineList: document.querySelector('#engine-list'),
   engineNote: document.querySelector('#engine-note'),
+  engineDirNote: document.querySelector('#engine-dir-note'),
+  chooseEnginesDir: document.querySelector('#choose-engines-dir'),
   probeEngines: document.querySelector('#probe-engines'),
 
   stepAnalyze: document.querySelector('#step-analyze'),
@@ -76,6 +87,8 @@ const elements = {
 };
 
 const MODES = ['combined', 'video', 'audio', 'images'];
+const HISTORY_RENDER_LIMIT = 30;
+let defaultTemplate = '%(title).180B [%(id)s].%(ext)s';
 let mode = 'combined';
 let media = null;
 let analyzing = false;
@@ -85,6 +98,7 @@ let auth = null;
 let engines = null;
 let history = [];
 let contextSiteId = '';
+let lastFinishedKey = '__none__';
 
 // ── 基础状态 ──────────────────────────────────────────────────────────────
 function setStatus(message, type = '') {
@@ -159,6 +173,20 @@ function make(text, tag = 'span') {
   return node;
 }
 
+// 主进程没给 size 时的兜底换算（界面永远显示真实字节数换算出来的大小，不显示猜测值）。
+function humanBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = value;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(unit === 0 || size >= 100 ? 0 : 1)} ${units[unit]}`;
+}
+
 function makeButton(text, className, onClick, disabled) {
   const node = document.createElement('button');
   node.type = 'button';
@@ -200,10 +228,17 @@ function renderEngines() {
   const galleryMissing = !engines['gallery_dl']?.available;
   const ffmpegMissing = !engines['ffmpeg']?.available;
   const notes = [];
-  if (!engines['yt_dlp']?.available) notes.push('没有 yt-dlp 就无法下载视频，请检查左侧引擎路径或安装目录设置。');
+  if (!engines['yt_dlp']?.available) notes.push('没有 yt-dlp 就无法下载视频：装一份，或点下面"指定引擎目录"指到它所在的文件夹（安装包里的 resources/bin）后重新探测。');
   if (galleryMissing) notes.push('没有 gallery-dl：图集会改用内置取图器逐张保存，Instagram/小红书可能因此受限。');
-  if (ffmpegMissing) notes.push('没有 ffmpeg：视频与音频分开的轨道无法合并，请改用"自带音频"的画质或只下载视频。');
+  if (ffmpegMissing) notes.push('没有 ffmpeg：视频与音频分开的轨道无法合并，请改选"自带音频"的画质或只下载视频。');
   elements.engineNote.textContent = notes.join(' ');
+  const dirStatus = engines.engines_dir;
+  elements.engineDirNote.textContent = dirStatus
+    ? (dirStatus.configured
+      ? (dirStatus.exists ? `引擎目录：${dirStatus.path}` : `引擎目录已失效：${dirStatus.path}`)
+      : '未指定引擎目录（按环境变量与 PATH 查找）')
+    : '';
+  elements.engineDirNote.classList.toggle('warn', Boolean(dirStatus && dirStatus.configured && !dirStatus.exists));
 }
 
 function sourceLabel(source) {
@@ -217,25 +252,50 @@ function sourceLabel(source) {
 }
 
 // ── 登录态面板 ────────────────────────────────────────────────────────────
-const SITE_LABELS = {
-  douyin: '抖音',
-  tiktok: 'TikTok',
-  bilibili: '哔哩哔哩',
-  xiaohongshu: '小红书',
-  instagram: 'Instagram',
-};
+// 站点表（名称、域名、内容形态）只有一个来源：主进程里的 engine-core。
+// 界面自己抄一份域名就会分叉 —— 这里不再保留第二份。
+let siteCatalog = [];
+let siteLabels = {};
+let sitesLoaded = false;
+
+function applySiteCatalog(list) {
+  siteCatalog = Array.isArray(list) ? list : [];
+  siteLabels = {};
+  for (const site of siteCatalog) siteLabels[site.id] = site.label;
+  sitesLoaded = true;
+  renderAuth();
+  updateContextChips();
+}
+
+function siteOf(url) {
+  if (!url) return null;
+  let host = '';
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+  return siteCatalog.find((site) => (site.domains || []).some(
+    (domain) => host === domain || host.endsWith('.' + domain),
+  )) || null;
+}
 
 function renderAuth() {
   elements.authList.replaceChildren();
+  if (!siteCatalog.length) {
+    elements.authList.append(make(sitesLoaded ? '没有读到站点表，重新打开窗口可恢复。' : '正在读取站点表…', 'li'));
+    return;
+  }
   if (!auth) {
     elements.authList.append(make('正在检测登录态…', 'li'));
     return;
   }
   const sites = auth.sites || {};
-  const ids = Object.keys(SITE_LABELS);
+  const ids = siteCatalog.map((site) => site.id);
   // 当前链接涉及的站点排最前，用户不必翻找。
   ids.sort((a, b) => (b === contextSiteId ? 1 : 0) - (a === contextSiteId ? 1 : 0));
   for (const siteId of ids) {
+    const meta = siteCatalog.find((site) => site.id === siteId) || {};
     const record = sites[siteId] || {};
     const row = document.createElement('li');
     row.className = 'auth-row';
@@ -248,7 +308,7 @@ function renderAuth() {
     const body = document.createElement('div');
     body.className = 'auth-body';
     const title = document.createElement('strong');
-    title.textContent = SITE_LABELS[siteId];
+    title.textContent = meta.label || siteId;
     if (record.login_required) {
       const tag = make('必须登录', 'em');
       tag.className = 'tag-required';
@@ -262,13 +322,18 @@ function renderAuth() {
         ? `已登录 · 依据 ${judged} · ${formatExpiry(record.expires_at)} 过期`
         : `已登录 · 依据 ${judged} · 会话型 Cookie（关掉即失效）`;
     } else if (record.expired_detected) {
-      detail.textContent = '登录已过期，请重新登录。';
+      detail.textContent = '登录已过期，请点"登录"重新完成一次。';
     } else {
       detail.textContent = record.has_partition
         ? '没有检测到有效登录 Cookie。'
         : '从未在这个应用里登录过。';
     }
     body.append(detail);
+    const kind = document.createElement('small');
+    kind.className = 'auth-kind';
+    kind.textContent = (meta.content_kind === 'images' ? '图集为主' : '视频为主')
+      + (record.exported ? ' · 已导出给命令行' : '');
+    body.append(kind);
 
     const actions = document.createElement('div');
     actions.className = 'auth-actions';
@@ -282,6 +347,16 @@ function renderAuth() {
 
     row.append(dot, body);
     elements.authList.append(row);
+  }
+
+  const storage = auth.storage;
+  if (storage) {
+    const exportedList = (storage.exported || []).map((id) => siteLabels[id] || id);
+    elements.authStorageNote.textContent = [
+      `会话存放：${storage.session_dir}（每站点一个独立分区，仅当前 Windows 账户可读）。`,
+      `导出文件：${storage.cookie_dir}（写出时按 0600 请求；${exportedList.length ? `当前已导出：${exportedList.join('、')}` : '当前没有导出任何 Cookie 文件'}）。`,
+      '本应用不读取、不显示、不记录任何 Cookie 值。',
+    ].join(' ');
   }
 }
 
@@ -297,11 +372,11 @@ function formatExpiry(iso) {
 }
 
 async function openLogin(siteId) {
-  setStatus(`请在弹出的 ${SITE_LABELS[siteId]} 窗口中登录，关闭该窗口后这里会自动检测。`);
+  setStatus(`请在弹出的 ${(siteLabels[siteId] || siteId)} 窗口中登录，关闭该窗口后这里会自动检测。`);
   try {
     await window.qingying.openLogin(siteId);
   } catch {
-    setStatus(`无法打开 ${SITE_LABELS[siteId]} 登录窗口。`, 'error');
+    setStatus(`无法打开 ${(siteLabels[siteId] || siteId)} 登录窗口。`, 'error');
   }
 }
 
@@ -309,7 +384,7 @@ async function logoutSite(siteId) {
   try {
     await window.qingying.logoutSite(siteId);
     await refreshAuth();
-    setStatus(`${SITE_LABELS[siteId]} 已退出登录（本机会话已清除）。`, 'success');
+    setStatus(`${siteLabels[siteId] || siteId} 已退出登录（本机会话已清除）。`, 'success');
   } catch {
     setStatus('退出登录失败。', 'error');
   }
@@ -321,9 +396,9 @@ async function exportSite(siteId, enabled) {
     if (!result?.ok) {
       setStatus(result?.error || '导出失败。', 'error');
     } else if (result.exported) {
-      setStatus(`已导出 ${SITE_LABELS[siteId]} 登录态给命令行接口，文件在本机数据目录里。`, 'success');
+      setStatus(`已导出 ${siteLabels[siteId] || siteId} 登录态给命令行接口，文件在本机数据目录里（随时可撤销）。`, 'success');
     } else {
-      setStatus(`已撤销 ${SITE_LABELS[siteId]} 的命令行导出。`, 'success');
+      setStatus(`已撤销 ${siteLabels[siteId] || siteId} 的命令行导出，本机文件已删除。`, 'success');
     }
     await refreshAuth();
   } catch {
@@ -341,7 +416,7 @@ async function refreshAuth() {
   }
 }
 
-// ── 输入框下方的上下文条：这条链接归谁、要不要登录、用哪个引擎 ─────────────
+// ── 输入框下方的上下文条：这条链接归谁、要不要登录、走哪条链路 ─────────────
 function updateContextChips() {
   const url = elements.url.value.trim();
   contextSiteId = '';
@@ -349,38 +424,20 @@ function updateContextChips() {
   elements.loginChip.classList.add('hidden');
   elements.contextLogin.classList.add('hidden');
 
-  const siteId = detectSite(url);
-  if (!siteId) return;
-  contextSiteId = siteId;
+  const site = siteOf(url);
+  if (!site) return;
+  contextSiteId = site.id;
 
-  const record = auth?.sites?.[siteId] || {};
-  elements.siteChip.textContent = SITE_LABELS[siteId];
+  const record = auth?.sites?.[site.id] || {};
+  elements.siteChip.textContent = `${site.label} · ${site.content_kind === 'images' ? '图集为主' : '视频为主'}`;
   elements.siteChip.classList.remove('hidden');
-  elements.loginChip.textContent = record.logged_in ? '已登录' : (record.login_required ? '需要登录' : '未登录（可匿名试）');
-  elements.loginChip.className = `chip ${record.logged_in ? 'ok' : (record.login_required ? 'warn' : '')}`;
+  elements.loginChip.textContent = record.logged_in ? '已登录' : (site.login_required ? '必须登录' : '未登录（可匿名试）');
+  elements.loginChip.className = `chip ${record.logged_in ? 'ok' : (site.login_required ? 'warn' : '')}`;
   elements.loginChip.classList.remove('hidden');
   const loginButton = elements.contextLogin;
   loginButton.textContent = record.logged_in ? '重新登录该站点' : '登录该站点';
   loginButton.classList.remove('hidden');
   if (media) renderAuth();
-}
-
-function detectSite(url) {
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    return Object.keys(SITE_LABELS).find((siteId) => {
-      const domains = {
-        douyin: ['douyin.com', 'iesdouyin.com'],
-        tiktok: ['tiktok.com'],
-        bilibili: ['bilibili.com', 'b23.tv'],
-        xiaohongshu: ['xiaohongshu.com', 'xhslink.com'],
-        instagram: ['instagram.com', 'instagr.am', 'ddinstagram.com'],
-      }[siteId] || [];
-      return domains.some((domain) => host === domain || host.endsWith(`.${domain}`));
-    }) || '';
-  } catch {
-    return '';
-  }
 }
 
 // ── 解析 ──────────────────────────────────────────────────────────────────
@@ -392,15 +449,72 @@ function setAnalyzeBusy(busy) {
   elements.analyzeText.textContent = busy ? '正在解析' : '解析链接';
 }
 
+const KIND_LABELS = {
+  bad_url: '链接格式不对',
+  bad_input: '任务参数不完整',
+  engine_missing: '引擎未安装',
+  login_required: '需要登录',
+  needs_login: '可能需要登录',
+  site_changed: '站点改版（本机引擎版本落后）',
+  unsupported_site: '这条链接该站点不支持',
+  unsupported_url: '这不是具体内容页',
+  no_formats: '两个引擎都没有可下载内容',
+  link_gone: '内容已失效或被删除',
+  network: '网络不通',
+  proxy: '被代理或证书拦下',
+  rate_limited: '站点在限流',
+  ipc_failed: '界面与主进程通信中断',
+  unknown: '原因未归类（原始输出见下）',
+};
+
+function kindLabel(kind) {
+  return KIND_LABELS[kind] || kind || '未知';
+}
+
+const OUTCOME_LABELS = {
+  ok: '成功',
+  no_result: '没有返回内容',
+  no_formats: '没有可用格式（说明该走另一个引擎）',
+  failed: '报错',
+};
+
+// 引擎判定过程：谁先上、为什么、备胎有没有试过 —— 降级永远是看得见的。
+function renderChainList(container, steps) {
+  container.replaceChildren();
+  for (const step of (Array.isArray(steps) ? steps : [])) {
+    const item = document.createElement('li');
+    item.className = `chain-step outcome-${step.outcome || (step.available === false ? 'unavailable' : 'planned')}`;
+    const head = document.createElement('strong');
+    head.textContent = step.engine
+      + (step.role === 'fallback' ? '（备胎）' : step.role === 'primary' ? '（首选）' : '')
+      + (step.outcome ? ` —— ${OUTCOME_LABELS[step.outcome] || step.outcome}` : (step.available === false ? ' —— 本机没有这个引擎，跳过' : ' —— 计划中'));
+    item.append(head);
+    if (step.detail) item.append(make(step.detail, 'small'));
+    else if (step.reason) item.append(make(step.reason, 'small'));
+    if (step.ms) item.append(make(`用时 ${(step.ms / 1000).toFixed(1)} 秒`, 'small'));
+    container.append(item);
+  }
+  if (!container.children.length) {
+    container.append(make('还没有任何引擎尝试记录。', 'li'));
+  }
+}
+
 function showParseError(result) {
   media = null;
   elements.mediaCard.classList.add('hidden');
   elements.emptyState.classList.add('hidden');
   elements.errorCard.classList.remove('hidden');
   elements.errorSummary.textContent = result.error || '解析失败。';
+  elements.errorKind.textContent = `原因：${kindLabel(result.kind)}｜链接：${elements.url.value.trim()}`;
+  renderChainList(elements.errorChainList, result.engine_plan && !result.engine_attempts?.length
+    ? result.engine_plan
+    : (result.engine_attempts || []));
+  const detailSteps = (result.engine_plan || []).map((step) => `计划 ${step.engine}（${step.role || ''}）：${step.reason}${step.unavailable ? ' [本机不可用]' : ''}`);
+  const detailAttempts = (result.engine_attempts || []).map((step) => `尝试 ${step.engine} → ${step.outcome}（${step.ms || 0}ms）${step.detail ? '：' + step.detail : ''}`);
   elements.errorDetail.textContent = [
-    `原因分类：${result.kind || 'unknown'}`,
-    `引擎尝试：${JSON.stringify(result.engine_attempts || [])}`,
+    `原因分类：${result.kind || 'unknown'}（${kindLabel(result.kind)}）`,
+    ...detailSteps,
+    ...detailAttempts,
     `链接：${elements.url.value.trim()}`,
   ].join('\n');
   elements.remedyList.replaceChildren();
@@ -414,7 +528,7 @@ function showParseError(result) {
     elements.remedyList.append(make('没有更多可自动执行的动作，请把上面的原始输出复制给开发者。', 'li'));
   }
   setWorkflow(1, 'current');
-  setStatus('解析没有成功，下面给出可以点下一步的动作。', 'error');
+  setStatus(`解析没有成功（${kindLabel(result.kind)}），下面给出可以点下一步的动作。`, 'error');
 }
 
 const REMEDY_LABELS = {
@@ -424,15 +538,18 @@ const REMEDY_LABELS = {
   wait_retry: '等 20 秒后重试',
   other_engine: '改用另一个引擎重试',
   copy_diagnostics: '复制诊断信息',
-  install_engine: '查看引擎状态',
-  check_network: '检查网络后重试',
+  install_engine: '查看引擎状态并重新探测',
+  check_network: '检查网络/代理后重试',
   fix_url: '回到输入框改链接',
+  update_engine: '看引擎版本并考虑升级',
+  check_page_type: '回到输入框换一条内容页链接',
+  copy_link: '回到输入框换一条链接',
 };
 
 function runRemedy(remedy, result) {
   switch (remedy.action) {
     case 'login':
-      openLogin(contextSiteId || detectSite(elements.url.value.trim()));
+      openLogin(contextSiteId || siteOf(elements.url.value.trim())?.id || '');
       break;
     case 'open_site':
       void window.qingying.openExternal(elements.url.value.trim());
@@ -442,23 +559,31 @@ function runRemedy(remedy, result) {
       void analyze();
       break;
     case 'wait_retry':
-      setStatus('等待 20 秒后自动重试（站点在限流）。');
+      setStatus('等待 20 秒后自动重试（站点在限流，连打只会延长被限流时间）。');
       setTimeout(() => analyze(), 20000);
       break;
     case 'other_engine':
-      void analyze(result?.forcePreference || (media ? '' : otherEnginePreference()));
+      void analyze(result?.forcePreference || otherEnginePreference());
       break;
     case 'copy_diagnostics':
       void window.qingying.writeClipboard(elements.errorDetail.textContent || '');
       setStatus('诊断信息已复制到剪贴板。', 'success');
       break;
     case 'install_engine':
-      void probeEngines();
-      elements.engineList.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      void probeEngines().then(() => elements.engineList.scrollIntoView({ behavior: 'smooth', block: 'center' }));
       break;
+    case 'update_engine':
+      void probeEngines().then(() => {
+        elements.engineList.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setStatus('已列出本机引擎版本。站点改版时先升级 yt-dlp / gallery-dl（例如 yt-dlp -U），再点"重新探测"。');
+      });
+      break;
+    case 'check_page_type':
+    case 'copy_link':
     case 'fix_url':
       elements.url.focus();
-      setStatus('请粘贴完整的 http/https 链接。');
+      elements.url.select();
+      setStatus('请把链接换成打开某一条具体内容后复制到的地址。');
       break;
     default:
       void analyze();
@@ -522,7 +647,13 @@ function renderMedia() {
   elements.meta.textContent = imagesOnly
     ? `${imageCount} 张图片 · 可直接保存原图`
     : `${formatDuration(media.duration)} · ${media.videos.length} 个视频格式 · ${media.audios.length} 个音频格式`;
-  elements.engineLine.textContent = `引擎：${media.engine} —— ${media.engine_reason || ''}`;
+  const versionSuffix = media.engine_version ? ` · 版本 ${media.engine_version}` : '';
+  elements.engineLine.textContent = `引擎：${media.engine}${versionSuffix} —— ${media.engine_reason || ''}`;
+  const chainSteps = (media.engine_chain && media.engine_chain.length)
+    ? media.engine_chain
+    : (media.engine_plan || []);
+  elements.engineChain.classList.toggle('hidden', !chainSteps.length);
+  renderChainList(elements.engineChainList, chainSteps);
 
   const tabs = document.querySelector('.mode-tabs');
   if (imagesOnly) {
@@ -719,7 +850,8 @@ function renderQueue(snapshot) {
     const head = document.createElement('div');
     head.className = 'task-head';
     head.append(make(task.title, 'strong'));
-    head.append(make(`${STATUS_LABELS[task.status] || task.status}${task.used_engine ? ` · ${task.used_engine}` : ''}${task.attempts > 1 ? ` · 第 ${task.attempts} 次尝试` : ''}`, 'span'));
+    const retryText = task.retrying ? ' · 等重试倒计时' : task.attempts > 1 ? ` · 第 ${task.attempts} 次尝试` : '';
+    head.append(make(`${STATUS_LABELS[task.status] || task.status}${task.used_engine ? ` · ${task.used_engine}` : ''}${retryText}`, 'span'));
     item.append(head);
 
     const meta = document.createElement('p');
@@ -747,11 +879,30 @@ function renderQueue(snapshot) {
     if (task.error) {
       const error = document.createElement('p');
       error.className = 'task-error';
-      error.textContent = `${task.error}${task.kind ? `（${task.kind}）` : ''}`;
+      error.textContent = `${task.error}${task.kind ? `（${kindLabel(task.kind)}）` : ''}`;
       item.append(error);
-      for (const remedy of (task.remedies || []).slice(0, 3)) {
-        item.append(makeButton(REMEDY_LABELS[remedy.action] || remedy.label, 'remedy-button', () => runRemedy(remedy, null)));
+      for (const remedy of (task.remedies || []).slice(0, 4)) {
+        const button = makeButton(REMEDY_LABELS[remedy.action] || remedy.label, 'remedy-button', () => {
+          if (remedy.action === 'login' || remedy.action === 'open_site') {
+            elements.url.value = task.url || '';
+            updateContextChips();
+          }
+          if (remedy.action === 'retry') {
+            void window.qingying.retryTask(task.id);
+            return;
+          }
+          runRemedy(remedy, null);
+        });
+        item.append(button);
+        if (remedy.detail) item.append(make(remedy.detail, 'task-remedy-detail'));
       }
+    }
+
+    if (task.status === 'paused' || task.status === 'cancelled') {
+      const hint = document.createElement('p');
+      hint.className = 'task-meta';
+      hint.textContent = '已下载的分片保留在目标目录里（.part / .ytdl），点"重试/继续"会接着下，不会从头重来。';
+      item.append(hint);
     }
 
     if (task.status === 'done' && task.files?.length) {
@@ -759,7 +910,8 @@ function renderQueue(snapshot) {
       list.className = 'task-files';
       for (const file of task.files.slice(0, 3)) {
         const name = String(file.path).split(/[\\/]/).pop();
-        const button = makeButton(`${name} (${file.size || ''})`, 'mini-button ghost', () => {
+        const size = file.size || humanBytes(file.bytes);
+        const button = makeButton(`${name}${size ? ` (${size})` : ''}`, 'mini-button ghost', () => {
           void window.qingying.revealFile(file.path);
         });
         button.title = file.path;
@@ -788,6 +940,42 @@ function renderQueue(snapshot) {
     item.append(actions);
     elements.taskList.append(item);
   }
+
+  // 有任务进入终态就去清点一次残留分片（不在每次进度回调里扫盘）。
+  const finishedKey = tasks
+    .filter((task) => ['done', 'failed', 'cancelled', 'paused'].includes(task.status))
+    .map((task) => `${task.id}:${task.status}`)
+    .join(',');
+  if (finishedKey !== lastFinishedKey) {
+    lastFinishedKey = finishedKey;
+    scheduleTempScan();
+  }
+}
+
+let tempScanTimer = null;
+function scheduleTempScan() {
+  clearTimeout(tempScanTimer);
+  tempScanTimer = setTimeout(() => void refreshTempFiles(), 700);
+}
+
+async function refreshTempFiles() {
+  const folder = elements.folder.value.trim();
+  if (!folder) {
+    elements.tempRow.classList.add('hidden');
+    return;
+  }
+  try {
+    const scan = await window.qingying.scanTempFiles(folder);
+    if (!scan?.valid || !scan.count) {
+      elements.tempRow.classList.add('hidden');
+      return;
+    }
+    elements.tempNote.textContent = `下载目录里有 ${scan.count} 个未完成的分片（共 ${scan.size_text || humanBytes(scan.bytes)}），`
+      + `最早的是 ${formatTime(scan.oldest)}。暂停/重试会接着用它们；确认不要了可以清掉，成品文件不受影响。`;
+    elements.tempRow.classList.remove('hidden');
+  } catch {
+    elements.tempRow.classList.add('hidden');
+  }
 }
 
 const STATUS_LABELS = {
@@ -805,21 +993,20 @@ function renderHistory(items) {
   const list = history || [];
   const done = list.filter((item) => item.status === 'done').length;
   const failed = list.filter((item) => item.status === 'failed').length;
+  const shown = Math.min(list.length, HISTORY_RENDER_LIMIT);
   elements.historySummary.textContent = list.length
-    ? `最近 ${list.length} 条 · 成功 ${done} · 失败 ${failed}`
+    ? `共 ${list.length} 条 · 成功 ${done} · 失败 ${failed} · 这里列出最近 ${shown} 条`
     : '还没有记录';
   elements.historyEmpty.classList.toggle('hidden', list.length > 0);
   elements.historyList.replaceChildren();
 
-  for (const item of list.slice(0, 30)) {
+  for (const item of list.slice(0, HISTORY_RENDER_LIMIT)) {
     const row = document.createElement('li');
     row.className = `history-row status-${item.status}`;
     const body = document.createElement('div');
     body.append(make(item.title || safeHost(item.url) || '未命名', 'strong'));
     const detail = document.createElement('small');
-    const bytesText = item.bytes
-      ? `${(item.bytes / 1048576).toFixed(item.bytes > 104857600 ? 0 : 1)} MB`
-      : '';
+    const bytesText = item.bytes ? humanBytes(item.bytes) : '';
     detail.textContent = [
       STATUS_LABELS[item.status] || item.status,
       item.engine,
@@ -882,10 +1069,25 @@ let saveTimer = null;
 function saveSettings(patch) {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
-    const result = await window.qingying.settingsSet(patch);
+    let result;
+    try {
+      result = await window.qingying.settingsSet(patch);
+    } catch (error) {
+      setStatus(`设置保存失败：${error?.message || '主进程没有响应'}`, 'error');
+      return;
+    }
     if (result && result.ok === false) {
       setStatus(result.error || '设置没有保存成功。', 'error');
+      // 命名模板不合法时**保留用户输入并把错误留在框下**：静默改回默认值会让人
+      // 以为存好了，实际下载用的是另一套名字。
+      if ('filenameTemplate' in patch) {
+        elements.templateError.textContent = '没有保存：' + (result.error || '命名模板不合法。');
+        elements.templateError.classList.remove('hidden');
+        elements.template.classList.add('invalid');
+        return;
+      }
     }
+    elements.template.classList.remove('invalid');
     if (result?.settings) applySettings(result.settings);
   }, 260);
 }
@@ -1059,10 +1261,13 @@ elements.chooseFolder.addEventListener('click', async () => {
 });
 elements.folder.addEventListener('change', () => saveSettings({ outputDir: elements.folder.value.trim() }));
 elements.folder.addEventListener('change', refreshFilenamePreview);
+elements.folder.addEventListener('change', scheduleTempScan);
 elements.template.addEventListener('input', () => saveSettings({ filenameTemplate: elements.template.value.trim() }));
 elements.templateReset.addEventListener('click', () => {
-  elements.template.value = '%(title).180B [%(id)s].%(ext)s';
-  saveSettings({ filenameTemplate: elements.template.value });
+  elements.template.value = defaultTemplate;
+  elements.template.classList.remove('invalid');
+  elements.templateError.classList.add('hidden');
+  saveSettings({ filenameTemplate: defaultTemplate });
 });
 elements.settingSubfolder.addEventListener('change', () => saveSettings({ subfolderByPost: elements.settingSubfolder.checked }));
 elements.settingExportCookies.addEventListener('change', async () => {
@@ -1093,6 +1298,50 @@ elements.clearHistory.addEventListener('click', async () => {
 });
 elements.probeEngines.addEventListener('click', () => void probeEngines());
 
+elements.chooseEnginesDir.addEventListener('click', async () => {
+  try {
+    const result = await window.qingying.chooseEnginesDir();
+    if (!result) return;
+    engines = result.engines || engines;
+    renderEngines();
+    const found = ['yt_dlp', 'gallery_dl', 'ffmpeg'].filter((key) => engines?.[key]?.available).length;
+    setStatus(`引擎目录已设为 ${result.dir}（现在找到 ${found} 个）。`, 'success');
+  } catch {
+    setStatus('无法打开目录选择窗口。', 'error');
+  }
+});
+
+// 两步确认：不用弹窗，但绝不"一点就把文件删了"。
+let tempArmed = false;
+let tempArmTimer = null;
+elements.tempClean.addEventListener('click', async () => {
+  if (!tempArmed) {
+    tempArmed = true;
+    elements.tempClean.textContent = '确认清理（再点一次）';
+    elements.tempClean.classList.add('danger');
+    clearTimeout(tempArmTimer);
+    tempArmTimer = setTimeout(() => {
+      tempArmed = false;
+      elements.tempClean.textContent = '清理这些分片';
+      elements.tempClean.classList.remove('danger');
+    }, 5000);
+    return;
+  }
+  const result = await window.qingying.cleanTempFiles(elements.folder.value.trim());
+  tempArmed = false;
+  elements.tempClean.textContent = '清理这些分片';
+  elements.tempClean.classList.remove('danger');
+  if (result?.error) {
+    setStatus(result.error, 'error');
+  } else if (result?.removed) {
+    setStatus(`已清掉 ${result.removed} 个未完成分片（${result.size_text || humanBytes(result.bytes)}），成品文件没有动。`, 'success');
+  } else {
+    setStatus('没有删掉任何文件。', 'error');
+  }
+  if (result?.failed?.length) setStatus(`有 ${result.failed.length} 个分片删不掉（可能被引擎占用），稍后再试。`, 'error');
+  await refreshTempFiles();
+});
+
 window.qingying.onQueueChanged((snapshot) => {
   renderQueue(snapshot);
   if (snapshot?.settings) applySettings(snapshot.settings);
@@ -1119,14 +1368,20 @@ renderAuth();
 
 async function bootstrap() {
   try {
-    const [info, settingsResult, queueResult, historyResult, enginesResult] = await Promise.all([
+    const [info, settingsResult, queueResult, historyResult, enginesResult, sites] = await Promise.all([
       window.qingying.getAppInfo(),
       window.qingying.settingsGet(),
       window.qingying.listQueue(),
       window.qingying.historyList(),
       window.qingying.enginesProbe(),
+      window.qingying.sitesList(),
     ]);
+    applySiteCatalog(sites);
     if (info?.version) elements.appVersion.textContent = `v${info.version}`;
+    if (info?.default_template) defaultTemplate = info.default_template;
+    if (Array.isArray(info?.template_fields)) {
+      elements.templateFieldHint.textContent = '可用字段：' + info.template_fields.join('、') + '；必须包含 %(ext)s。';
+    }
     engines = enginesResult;
     renderEngines();
     applySettings(settingsResult);
@@ -1138,7 +1393,8 @@ async function bootstrap() {
     auth = await window.qingying.authStatus();
     renderAuth();
     updateContextChips();
-    if (info?.data_dir) elements.dataDirNote.textContent = `本机数据目录：${info.data_dir}`;
+    if (info?.data_dir) elements.dataDirNote.textContent = `本机数据目录：${info.data_dir}（设置、历史、登录态导出都只在这里，不在仓库里）。`;
+    void refreshTempFiles();
   } catch (error) {
     setStatus(`初始化失败：${error?.message || '未知错误'}`, 'error');
   }

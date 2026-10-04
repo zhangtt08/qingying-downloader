@@ -132,6 +132,7 @@ const tools = [
       return {
         data_dir: dir,
         engines,
+        engines_dir: core.enginesDirStatus(safeSettings(dir).enginesDir),
         search_roots: engineOptions(dir).extraRoots,
         env_overrides: {
           'yt-dlp': process.env.QINGYING_YT_DLP || '',
@@ -174,7 +175,9 @@ const tools = [
           url,
           site: core.matchLoginSite(url)?.id || '',
           reason: result.kind || 'unknown',
+          reason_text: reasonText(result.kind),
           message: result.error,
+          engine_plan: result.engine_plan || [],
           engine_chain: result.engine_attempts || [],
           next_actions: (result.remedies || []).map((r) => ({ action: r.action, label: r.label, detail: r.detail })),
         };
@@ -187,8 +190,11 @@ const tools = [
         ok: true,
         url,
         engine: data.engine,
+        engine_version: data.engine_version || '',
+        engine_source: data.engine_source || '',
         engine_reason: data.engine_reason,
         engine_chain: data.engine_chain,
+        engine_plan: data.engine_plan || [],
         cookie_source: data.cookie_source || 'none',
         site: data.sessionId,
         site_label: data.siteLabel,
@@ -307,7 +313,8 @@ const tools = [
       // 删掉等于把登录态导出关掉，超出本次下载的授权范围。
       if (mode === 'images') {
         if ((input.engine === 'gallery-dl' || settings.enginePreference === 'gallery-dl') && engines.gallery_dl?.available) {
-          result = await core.runGalleryDlDownload({ url, outputDir, site, cookieFile }, hooks);
+          // engineOptions 必须传：gallery-dl 常常只在设置的"引擎目录"里、不在 PATH 上。
+          result = await core.runGalleryDlDownload({ url, outputDir, site, cookieFile, engineOptions: engineOptions(dir) }, hooks);
         } else {
           result = await core.runImageListDownload({
             url,
@@ -379,7 +386,7 @@ const tools = [
 
       if (!result.ok) {
         const partial = job.files.length ? `（已落盘 ${job.files.length} 个文件，${core.formatBytes(job.bytes)}）` : '';
-        throw new AgentError('download_failed', `${job.error || '下载失败'}${job.kind ? '（原因：' + job.kind + '）' : ''}${partial} 任务号 ${id}`);
+        throw new AgentError('download_failed', `${job.error || '下载失败'}（原因：${reasonText(job.kind)}）${partial} 任务号 ${id}`);
       }
 
       return {
@@ -560,6 +567,27 @@ const tools = [
 function resolveFfmpeg(engines) {
   if (engines.ffmpeg?.available) return engines.ffmpeg.path;
   return 'ffmpeg';
+}
+
+// 失败原因的中英文对照：调用方（模型或脚本）拿到 kind 之外还要拿到一句能行动的话。
+const REASON_TEXT = {
+  bad_url: '链接不是 http/https 完整网址',
+  engine_missing: '本机没有可用的引擎（yt-dlp / gallery-dl）',
+  login_required: '需要登录该站点',
+  needs_login: '可能需要登录（站点拒绝了匿名请求）',
+  site_changed: '站点改版或本机引擎版本落后',
+  unsupported_site: '该站点没有对应的解析器',
+  unsupported_url: '这不是具体内容页（首页/搜索页/用户页）',
+  no_formats: '两个引擎都没有返回可下载内容',
+  link_gone: '内容已失效、被删除或设为私密',
+  network: '网络不通或超时',
+  proxy: '被代理或证书拦下',
+  rate_limited: '站点在限流',
+  unknown: '原因未归类，看 message 与 engine_chain',
+};
+
+function reasonText(kind) {
+  return REASON_TEXT[kind] || kind || '未知原因';
 }
 
 export { tools };

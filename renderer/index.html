@@ -59,6 +59,10 @@
             <li class="engine-row"><span>正在探测…</span></li>
           </ul>
           <p id="engine-note" class="side-note"></p>
+          <div class="side-panel-foot">
+            <button id="choose-engines-dir" class="mini-button" type="button">指定引擎目录</button>
+            <span id="engine-dir-note" class="side-note"></span>
+          </div>
         </section>
 
         <div class="privacy-note">
@@ -71,16 +75,16 @@
 
         <footer>
           <span>仅保存你有权下载的内容</span>
-          <span id="app-version">v1.4.0</span>
+          <span id="app-version">v1.5.0</span>
         </footer>
       </aside>
 
       <main class="workspace">
         <header class="workspace-header">
           <div>
-            <p class="eyebrow">CAPTURE DESK</p>
+            <p class="eyebrow">本地下载台</p>
             <h2>下载清晰版本</h2>
-            <p>粘贴一条或一批链接，清影自己判断该用哪个引擎，不会立即下载。</p>
+            <p>粘贴一条或一批链接，清影自己判断该用哪个引擎并说明理由；解析不会自动下载。</p>
           </div>
           <span class="local-badge"><i></i> 本地处理</span>
         </header>
@@ -150,6 +154,7 @@
           <p id="status" class="status" role="status" aria-live="polite">
             等待粘贴链接
           </p>
+          <p class="input-hint">键盘：链接框里 Ctrl+V 粘贴，回车即解析；解析完按 Tab 到"加入下载队列"。</p>
         </section>
 
         <section id="empty-state" class="empty-state" aria-label="等待解析">
@@ -174,6 +179,8 @@
               <p id="error-summary"></p>
             </div>
           </div>
+          <p id="error-kind" class="kind-line"></p>
+          <ul id="error-chain-list" class="chain-list"></ul>
           <ul id="remedy-list" class="remedy-list"></ul>
           <details class="details">
             <summary>查看引擎原始输出</summary>
@@ -192,6 +199,10 @@
               <h3 id="title"></h3>
               <p id="meta" class="media-meta"></p>
               <p id="engine-line" class="engine-line"></p>
+              <details id="engine-chain" class="details hidden">
+                <summary>引擎判定过程（谁先上、为什么、另一个有没有试）</summary>
+                <ul id="engine-chain-list" class="chain-list"></ul>
+              </details>
             </div>
           </div>
 
@@ -274,6 +285,10 @@
 
           <ul id="task-list" class="task-list" aria-live="polite"></ul>
           <p id="task-empty" class="list-empty">队列是空的。解析一条链接后点"加入下载队列"。</p>
+          <div id="temp-row" class="temp-row hidden">
+            <p id="temp-note" class="side-note"></p>
+            <button id="temp-clean" class="mini-button ghost" type="button">清理这些分片</button>
+          </div>
         </section>
 
         <section class="card" aria-labelledby="storage-title">
@@ -304,6 +319,7 @@
               <input id="template" type="text" spellcheck="false" />
               <button id="template-reset" class="button secondary" type="button">恢复默认</button>
             </div>
+            <p id="template-field-hint" class="side-note">可用字段：title、id、ext、uploader、channel、autonumber、playlist、epoch、webpage_url、resolution、duration；必须包含 %(ext)s。</p>
             <p id="template-error" class="field-error hidden"></p>
           </div>
 
@@ -331,6 +347,7 @@
             <li class="auth-row"><span>正在检测…</span></li>
           </ul>
           <p class="side-note">登录窗口里的账号信息不回传到任何服务端；这里只显示状态与过期时间，不显示 Cookie 内容。</p>
+          <p class="side-note" id="auth-storage-note"></p>
         </section>
 
         <section class="card" aria-labelledby="history-title">

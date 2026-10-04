@@ -33,6 +33,12 @@ contextBridge.exposeInMainWorld('qingying', {
   exportSiteCookies: (site, enabled) => invoke('auth:export', { site, enabled }),
 
   enginesProbe: () => invoke('engines:probe'),
+  chooseEnginesDir: () => invoke('engines:choose-dir'),
+  sitesList: () => invoke('sites:list'),
+
+  // 未完成分片：看得见、能清掉（只碰 .part/.ytdl/.temp，不动成品文件）。
+  scanTempFiles: (folder) => invoke('temp:scan', { folder }),
+  cleanTempFiles: (folder) => invoke('temp:clean', { folder }),
 
   settingsGet: () => invoke('settings:get'),
   settingsSet: (patch) => invoke('settings:set', patch),
