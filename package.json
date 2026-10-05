@@ -7,10 +7,47 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
+    "build": "node scripts/build.cjs",
+    "dist": "node scripts/build.cjs --installer",
     "check": "node scripts/check.cjs",
     "verify": "node scripts/verify.cjs",
     "agent:serve": "node agent/server.mjs",
     "agent:mcp": "node agent/mcp-server.mjs",
     "agent:check": "node scripts/agent-smoke.cjs"
+  },
+  "devDependencies": {
+    "@electron/asar": "^4.3.1",
+    "electron": "^37.10.3",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.qingying.downloader",
+    "productName": "清影下载器",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "renderer/**/*",
+      "agent/**/*",
+      "package.json",
+      "!agent/.endpoint",
+      "!agent/*.log",
+      "!**/*.tmp"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "dir",
+        "nsis"
+      ],
+      "icon": "renderer/assets/app-icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "qingying-downloader-${version}-win-${arch}.exe"
+    }
   }
 }

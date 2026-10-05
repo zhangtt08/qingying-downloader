@@ -37,40 +37,47 @@ Do not bump these casually — newer releases are known to regress:
 ## 🏗️ Architecture
 
 ```
-electron/main.cjs      Main process — engine dispatch, format parsing, download queue, cookie injection
-electron/preload.cjs   Preload bridge
-renderer/              UI (index.html / app.js / styles.css / icons)
+electron/main.cjs        Main process — window, IPC, download queue, cookie injection, API startup
+electron/engine-core.cjs Shared engine core: both the UI and the agent APIs call this (analysis, args, progress, storage, path guards)
+electron/local-guard.cjs The one local-service guard both APIs run through (Host / Origin / token / loopback bind)
+electron/agent-api.cjs   In-app HTTP API (127.0.0.1:8392) — reuses the running app's engines and sessions
+electron/preload.cjs     Preload bridge (named methods only, no node in the renderer)
+agent/server.mjs         Standalone headless Agent API (127.0.0.1:8793)
+agent/tools.mjs          Its 8 schema'd tools            agent/mcp-server.mjs  MCP stdio bridge
+renderer/                UI (index.html / app.js / styles.css / icons)
+scripts/check.cjs        npm run check — static + core behaviour assertions
+scripts/verify.cjs       npm run verify — behavioural gates (guard, docs-vs-code)
+scripts/build.cjs        npm run build / npm run dist — pack + assemble + artifact assertions
 ```
 
 Pipeline: renderer → IPC → URL normalization (e.g. Douyin share links) → engine selection (yt-dlp for video, gallery-dl fallback for images) → format list → download queue with progress events → ffmpeg merge if needed.
 
 ## 🚀 Getting started
 
-> This repository is the extracted source of the packaged app; the packaged build bundles yt-dlp / gallery-dl / ffmpeg under `resources/bin/`. Use the packaged version if you just want to download files.
+This repository is the app source (it is what gets packed into `resources/app.asar`), and it has a real build chain — `npm run build` to validate and assemble, `npm run dist` to also produce an installer.
 
 Run from source (Windows):
 
 ```powershell
 git clone https://github.com/zhangtt08/qingying-downloader.git
 cd qingying-downloader
-npm install --save-dev electron ffmpeg-static
-# place the pinned exes where the app looks for them:
-#   yt-dlp.exe     -> resources/yt-dlp.exe   (or on PATH)
-#   gallery-dl.exe -> resources/bin/gallery-dl.exe (or on PATH)
-npx electron .
+npm install     # devDependencies: electron 37.10.3, @electron/asar, electron-builder
+npm start       # same thing as: npx electron .
 ```
 
-The packaged app resolves tools from `resources/bin/*.exe` next to the executable.
+The engine binaries (yt-dlp / gallery-dl / ffmpeg) are **not** in this repo — `/resources/` is gitignored, and the pinned exes belong to the machine or to the installer. Put them in `resources/bin/` (or on `PATH`), or point 设置 → 指定引擎目录 at the folder that already has them. Without them the app reports each engine as 未安装 instead of pretending. `npm install ffmpeg-static` is optional: `main.cjs` requires it inside a `try/catch`, so its absence only removes that fallback.
 
-### This repo's asar workflow (no build chain)
+### Build and package
 
-The packaged app has no build step; source edits go back and forth through asar:
+| Command | What it produces |
+|---|---|
+| `npm run build` | `dist/app.asar` (drop-in replacement for the packaged app's `resources/app.asar`) and `dist/win-unpacked/` — an unpacked, runnable app dir whose executable is `清影下载器.exe`; `resources/bin/*.exe` is copied in when those engines are present, and its absence is printed instead of hidden |
+| `npm run dist` | the same, plus the NSIS installer `dist/qingying-downloader-<version>-win-x64.exe` (measured here: 89 MB, Electron 37.10.3) |
 
-```powershell
-npx asar extract C:\software\QingYingDownloader\resources\app.asar QingYingDownloader_src
-# after editing, syntax-check with node --check
-npx asar pack QingYingDownloader_src C:\software\QingYingDownloader\resources\app.asar
-```
+Both are the same script (`scripts/build.cjs`, one extra flag), every step prints PASS/FAIL, and the build checks its own output: the bytes inside the produced asar must equal the repo sources, and no settings/history/cookie file may enter an artifact. `dist/` is gitignored, so building never dirties the tree.
+
+The old instructions in this file pointed at `npx asar extract C:\software\QingYingDownloader\resources\app.asar` — a path that exists only on one other machine, and there was no script behind it. They are gone: to patch an existing install in place, run `npm run build` and copy `dist/app.asar` over that install's `resources/app.asar`.
+
 
 ## 📄 License
 
@@ -89,6 +96,14 @@ While the app is running, a local HTTP API is available on `127.0.0.1:8392`. It 
 | `/api/download` | POST | `{url, outputDir, mode: "combined"\|"video"\|"audio"\|"images", videoId?, audioId?, audioFormat?, images?}` + token header | `{files: [saved paths]}` |
 
 Port override: `QINGYING_API_PORT`.
+
+### How many downloads run at once (measured, not aspirational)
+
+Concurrency comes from one place: `settings.concurrency`, **default 2, configurable 1–4** (`DEFAULT_SETTINGS.concurrency` in `electron/engine-core.cjs`, clamped by `clampInt(value, 1, 4, 2)`; the same selector as the UI's 并发 field). `pumpQueue()` in `electron/main.cjs` starts queued tasks while fewer than that many are in flight; the rest stay `queued`.
+
+`POST /api/download` enqueues into that same queue and returns when **its own** task reaches a terminal state, so a request that arrives while another download is running is **not** rejected: there is no "one at a time" limit and **no 409 on collision**. Status codes are only these: `200` task done, `403` the guard or the download-root check refused the request, `409` *this* task ended cancelled/paused, `502` the engine failed. Two callers waiting in parallel is the normal case, not an error.
+
+The headless agent on `8793` is a separate process: it shares `settings.json`/`history.json` with the UI but runs each `qingying.download` inline in its own process, so the app's `concurrency` number does not throttle it — N simultaneous requests there mean N engine calls.
 
 ### What the local API refuses, and why it can
 
