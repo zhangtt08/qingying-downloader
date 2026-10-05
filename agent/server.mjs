@@ -154,7 +154,7 @@ export async function start({ port: wantPort, host = '127.0.0.1', label = 'agent
       } else if (route === '/api/agent/tools') {
         json(res, 200, { ok: true, data: tools.map(descriptor) });
       } else if (route === '/api/agent/manifest') {
-        json(res, 200, { ok: true, data: { project: meta.name, version: meta.version, description: meta.summary || '', base_url: `http://${host}:${server.address().port}`, tools: tools.map(descriptor) } });
+        json(res, 200, { ok: true, data: { project: meta.name, version: meta.version, description: meta.summary || '', base_url: `http://${host}:${server.address().port}`, tools: tools.map(descriptor), api: { token_header: tokenHeader, token_file: tokenFile } } });
       } else if (route === '/api/agent/tool' && req.method === 'POST') {
         const body = await readBody(req);
         const tool = byName.get(body.tool);
@@ -176,7 +176,11 @@ export async function start({ port: wantPort, host = '127.0.0.1', label = 'agent
         json(res, 404, { ok: false, error: { code: 'not_found', message: `未知路径 ${route}`, endpoints: ['/api/health', '/api/agent/tools', '/api/agent/manifest', 'POST /api/agent/tool'] } });
       }
     } catch (e) {
-      json(res, 500, { ok: false, error: { code: 'internal', message: e.message } });
+      // 调用方修得了的问题不能报 500：坏 JSON、超大 body、缺必填都是调用方的错，
+      // 回 5xx 会让 Agent 以为"服务坏了"而反复重试，永远学不会改那行 body。
+      const code = e instanceof AgentError ? e.code : 'internal';
+      const callerFixable = e instanceof AgentError && ['bad_json', 'too_large', 'bad_input', 'unknown_tool', 'not_found'].includes(e.code);
+      json(res, callerFixable ? 400 : 500, { ok: false, error: { code, message: e.message } });
     }
   });
 
